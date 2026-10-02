@@ -149,6 +149,7 @@ run_trial() {
   local action_ready=false
   local action_chunks
   local action_frames
+  local controller_frames
   local task_status="running"
 
   trial_name="${scenario}-${target}-seed-$(printf '%02d' "$seed")"
@@ -252,8 +253,9 @@ run_trial() {
 
   action_chunks=$(grep -c 'New action chunk' "$trial_result/client.log" || true)
   action_frames=$(grep -c 'ZMQ: Sent latent action' "$trial_result/client.log" || true)
-  if (( action_chunks < 3 || action_frames < 1 )); then
-    echo "Insufficient closed-loop activity: chunks=$action_chunks frame_markers=$action_frames" >&2
+  controller_frames=$(grep -c 'frame_index:' "$trial_result/controller.log" || true)
+  if (( action_chunks < 3 || controller_frames < 1 )); then
+    echo "Insufficient closed-loop activity: chunks=$action_chunks controller_frames=$controller_frames" >&2
     return 1
   fi
   if [[ ! -s "$task_metrics" ]]; then
@@ -269,8 +271,9 @@ run_trial() {
 
   "$repo/.venv_inference/bin/python" .spark/analyze-eval.py "$trial_result" \
     >"$trial_result/performance.json"
-  printf 'action_chunks=%s\naction_frame_markers=%s\ntermination_reason=%s\n' \
-    "$action_chunks" "$action_frames" "$task_status" >"$trial_result/summary.txt"
+  printf 'action_chunks=%s\naction_frame_markers=%s\ncontroller_frames=%s\ntermination_reason=%s\n' \
+    "$action_chunks" "$action_frames" "$controller_frames" "$task_status" \
+    >"$trial_result/summary.txt"
   stop_trial
   sleep 2
 }

@@ -308,8 +308,9 @@ fi
 
 action_chunks=$(grep -c 'New action chunk' "$result/client.log" || true)
 action_frames=$(grep -c 'ZMQ: Sent latent action' "$result/client.log" || true)
-if (( action_chunks < 3 || action_frames < 1 )); then
-  echo "Insufficient closed-loop activity: chunks=$action_chunks frame_markers=$action_frames" >&2
+controller_frames=$(grep -c 'frame_index:' "$result/controller.log" || true)
+if (( action_chunks < 3 || controller_frames < 1 )); then
+  echo "Insufficient closed-loop activity: chunks=$action_chunks controller_frames=$controller_frames" >&2
   exit 1
 fi
 if grep -Eqi 'Traceback|segmentation fault|CUDA error|out of memory' \
@@ -321,5 +322,5 @@ fi
 nvidia-smi >"$result/nvidia-smi-evaluation.txt"
 "$repo/.venv_inference/bin/python" .spark/analyze-eval.py "$result" \
   >"$result/metrics.json"
-printf 'action_chunks=%s\naction_frame_markers=%s\n' \
-  "$action_chunks" "$action_frames" | tee "$result/summary.txt"
+printf 'action_chunks=%s\naction_frame_markers=%s\ncontroller_frames=%s\n' \
+  "$action_chunks" "$action_frames" "$controller_frames" | tee "$result/summary.txt"

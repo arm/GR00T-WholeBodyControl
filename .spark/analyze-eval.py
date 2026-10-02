@@ -26,6 +26,8 @@ def main() -> None:
 
     client = (args.result_dir / "client.log").read_text(errors="replace")
     simulator = (args.result_dir / "sim.log").read_text(errors="replace")
+    controller_path = args.result_dir / "controller.log"
+    controller = controller_path.read_text(errors="replace") if controller_path.exists() else ""
     latencies = [
         float(value) * 1000
         for value in re.findall(r"New action chunk .*?latency: ([0-9.]+)s", client)
@@ -35,6 +37,7 @@ def main() -> None:
         for value in re.findall(r"Image publish frequency:\s+([0-9.]+)", simulator)
     ]
     frames = [int(value) for value in re.findall(r"frame: ([0-9]+)", client)]
+    frames.extend(int(value) for value in re.findall(r"frame_index: ([0-9]+)", controller))
     drops = [int(value) for value in re.findall(r"message dropped: (\d+)", simulator)]
     if not latencies or not frequencies or not frames:
         raise SystemExit("result is missing latency, camera, or action-frame samples")
