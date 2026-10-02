@@ -748,18 +748,25 @@ class BottleTaskEnv(DefaultEnv):
             if hasattr(self, "object_body")
             else None
         )
+        object_off_table = bool(
+            task_time is not None and position is not None and position[2] < 0.2
+        )
+        if self.armed_at is None:
+            status = "waiting"
+        elif getattr(self, "success", False):
+            status = "success"
+        elif object_off_table:
+            status = "object_off_table"
+        elif task_time >= self.task_duration:
+            status = "complete"
+        else:
+            status = "running"
         payload = {
             "schema_version": 1,
             "scenario": self.scenario,
             "target": self.target,
             "seed": self.seed,
-            "status": (
-                "waiting"
-                if self.armed_at is None
-                else "complete"
-                if task_time >= self.task_duration
-                else "running"
-            ),
+            "status": status,
             "task_time_s": task_time,
             "task_duration_s": self.task_duration,
             "object_position": position,
@@ -771,6 +778,7 @@ class BottleTaskEnv(DefaultEnv):
                 and self.max_object_z >= self.initial_object_z + self.lift_height
             ),
             "success": getattr(self, "success", False),
+            "object_off_table": object_off_table,
             "wrong_object_lifted": getattr(self, "wrong_object_lifted", False),
             "robot_falls": getattr(self, "robot_falls", 0),
             "lower_body_locked": self.lock_lower_body,

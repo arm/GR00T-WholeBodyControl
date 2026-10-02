@@ -269,6 +269,14 @@ for _ in $(seq 1 "$task_duration"); do
   docker inspect -f '{{.State.Running}}' gr00t-wbc-policy | grep -qx true
   docker inspect -f '{{.State.Running}}' gr00t-wbc-controller | grep -qx true
   sleep 1
+  if [[ "$env_name" == "pnp_bottle" && -s "$task_metrics" ]]; then
+    task_status=$("$repo/.venv_inference/bin/python" -c \
+      'import json,sys; print(json.load(open(sys.argv[1]))["status"])' "$task_metrics")
+    if [[ "$task_status" == "success" || "$task_status" == "object_off_table" ]]; then
+      echo "Task reached terminal status: $task_status"
+      break
+    fi
+  fi
 done
 
 if [[ "$env_name" == "pnp_bottle" ]]; then

@@ -149,6 +149,7 @@ run_trial() {
   local action_ready=false
   local action_chunks
   local action_frames
+  local task_status="running"
 
   trial_name="${scenario}-${target}-seed-$(printf '%02d' "$seed")"
   trial_result="$result/trials/$trial_name"
@@ -239,6 +240,14 @@ run_trial() {
     docker inspect -f '{{.State.Running}}' gr00t-wbc-policy | grep -qx true
     docker inspect -f '{{.State.Running}}' gr00t-wbc-controller | grep -qx true
     sleep 1
+    if [[ -s "$task_metrics" ]]; then
+      task_status=$("$repo/.venv_inference/bin/python" -c \
+        'import json,sys; print(json.load(open(sys.argv[1]))["status"])' "$task_metrics")
+      if [[ "$task_status" == "success" || "$task_status" == "object_off_table" ]]; then
+        echo "Trial $trial_name reached terminal status: $task_status"
+        break
+      fi
+    fi
   done
 
   action_chunks=$(grep -c 'New action chunk' "$trial_result/client.log" || true)
@@ -260,8 +269,8 @@ run_trial() {
 
   "$repo/.venv_inference/bin/python" .spark/analyze-eval.py "$trial_result" \
     >"$trial_result/performance.json"
-  printf 'action_chunks=%s\naction_frame_markers=%s\n' \
-    "$action_chunks" "$action_frames" >"$trial_result/summary.txt"
+  printf 'action_chunks=%s\naction_frame_markers=%s\ntermination_reason=%s\n' \
+    "$action_chunks" "$action_frames" "$task_status" >"$trial_result/summary.txt"
   stop_trial
   sleep 2
 }

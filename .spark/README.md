@@ -126,7 +126,7 @@ GROOT_WBC_TASK_DURATION_S=90 \
     task-campaign-20261002-v1
 ```
 
-For a three-trial smoke campaign, set `GROOT_WBC_TRIALS_PER_SCENARIO=1`. The campaign retains per-trial logs, task metrics, latency/camera metrics, container identities, model hashes, and an evidence manifest under `/home/arm-seattle-spark-02/workspaces/gr00t-wbc-results/<tag>`.
+For a three-trial smoke campaign, set `GROOT_WBC_TRIALS_PER_SCENARIO=1`. A trial ends early only after a successful sustained lift or after the requested object falls irrecoverably below the table; otherwise it runs for the full duration. The campaign retains per-trial logs, task metrics, latency/camera metrics, container identities, model hashes, and an evidence manifest under `/home/arm-seattle-spark-02/workspaces/gr00t-wbc-results/<tag>`.
 
 The checkpoint repository's reference videos are pinned at revision `5fdb36c78c88b9cc3a2c584fcd8993e9955b2384`. The successful reference clips used to validate camera framing have SHA256 values `b9fa72cb3522de0e3221c0ea02efd326b3712a949ca6cb268e9c6b03754243aa` for the ego view and `62e8e2d2835fe4ea90325533f842f2d5db4620f7636e46af2258aae8fe194f60` for the third-person view.
 

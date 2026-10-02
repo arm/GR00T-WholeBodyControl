@@ -44,7 +44,10 @@ def main() -> None:
                 "scenario": task["scenario"],
                 "target": task["target"],
                 "seed": task["seed"],
+                "status": task["status"],
+                "task_time_s": task["task_time_s"],
                 "success": task["success"],
+                "object_off_table": task["object_off_table"],
                 "contact_observed": task["contact_observed"],
                 "lift_observed": task["lift_observed"],
                 "wrong_object_lifted": task["wrong_object_lifted"],
@@ -72,6 +75,9 @@ def main() -> None:
             "lifts": sum(bool(member["lift_observed"]) for member in members),
             "wrong_object_lifts": sum(
                 bool(member["wrong_object_lifted"]) for member in members
+            ),
+            "objects_off_table": sum(
+                bool(member["object_off_table"]) for member in members
             ),
             "robot_falls": sum(member["robot_falls"] for member in members),
             "latency_ms": {
