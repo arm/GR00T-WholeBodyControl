@@ -62,6 +62,9 @@ cleanup() {
   docker ps --format '{{.Names}}|{{.ID}}|{{.Status}}' >"$result/containers-after.txt" 2>&1
   nvidia-smi >"$result/nvidia-smi-after.txt" 2>&1
   printf '%s\n' "$status" >"$result/exit-code.txt"
+  find "$result" -type f ! -name evidence.sha256 -print0 \
+    | sort -z \
+    | xargs -0 sha256sum >"$result/evidence.sha256"
 }
 trap cleanup EXIT
 trap 'exit 130' INT
