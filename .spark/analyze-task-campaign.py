@@ -38,7 +38,7 @@ def main() -> None:
             raise SystemExit(f"Incomplete trial: {trial_dir}")
         task = json.loads(task_path.read_text())
         performance = json.loads(performance_path.read_text())
-        if task["status"] not in {"success", "object_off_table", "complete"}:
+        if task["status"] not in {"success", "object_off_table", "simulator_unstable", "complete"}:
             raise SystemExit(f"Nonterminal task metrics in {trial_dir}: {task['status']}")
         trials.append(
             {
@@ -55,6 +55,7 @@ def main() -> None:
                 "lift_observed": task["lift_observed"],
                 "wrong_object_lifted": task["wrong_object_lifted"],
                 "robot_falls": task["robot_falls"],
+                "simulator_instabilities": task.get("simulator_instabilities", 0),
                 "latency_ms": performance["latency_ms"],
                 "camera_frequency_hz": performance["camera_frequency_hz"],
                 "camera_dropped_messages": performance["camera_dropped_messages"],
@@ -83,6 +84,9 @@ def main() -> None:
                 bool(member["object_off_table"]) for member in members
             ),
             "robot_falls": sum(member["robot_falls"] for member in members),
+            "simulator_instabilities": sum(
+                member["simulator_instabilities"] for member in members
+            ),
             "latency_ms": {
                 "median_mean": statistics.fmean(
                     member["latency_ms"]["median"] for member in members

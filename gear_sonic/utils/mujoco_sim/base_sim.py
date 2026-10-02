@@ -618,12 +618,15 @@ class BottleTaskEnv(DefaultEnv):
         self.initial_object_z = float(self.mj_data.xpos[self.object_body.id][2])
         self.max_object_z = self.initial_object_z
         self.contact_observed = False
-        self.lift_started_at = None
+        self.lift_started_wall_time = None
         self.success = False
         self.wrong_object_lifted = False
         self.robot_falls = 0
+        self.simulator_instabilities = 0
+        self.simulator_unstable = False
         self.armed_at = None
         self.armed_wall_time = None
+        self.simulator_elapsed = 0.0
         self._locked_root_qpos = None
         self._locked_lower_qpos = {}
         self._last_metrics_write = -1.0
@@ -689,7 +692,19 @@ class BottleTaskEnv(DefaultEnv):
         mujoco.mj_forward(self.mj_model, self.mj_data)
 
     def sim_step(self):
+        previous_sim_time = float(self.mj_data.time)
         super().sim_step()
+        current_sim_time = float(self.mj_data.time)
+        state_is_finite = all(
+            np.all(np.isfinite(values))
+            for values in (self.mj_data.qpos, self.mj_data.qvel, self.mj_data.qacc)
+        )
+        if self.armed_at is not None:
+            if current_sim_time + 1e-9 < previous_sim_time or not state_is_finite:
+                self.simulator_instabilities += 1
+                self.simulator_unstable = True
+            else:
+                self.simulator_elapsed += current_sim_time - previous_sim_time
         if self.lock_lower_body and self.armed_at is not None:
             self._apply_lower_body_lock()
 
@@ -702,25 +717,35 @@ class BottleTaskEnv(DefaultEnv):
             self._write_metrics()
             return
 
-        task_time = float(self.mj_data.time) - self.armed_at
+        if self.simulator_unstable:
+            self._write_metrics(force=True)
+            return
+
+        wall_time = time.monotonic()
         object_z = float(self.mj_data.xpos[self.object_body.id][2])
         self.max_object_z = max(self.max_object_z, object_z)
-        contact = check_contact(
+        current_contact = check_contact(
             self.mj_model,
             self.mj_data,
             self.RIGHT_HAND_BODIES,
             self.object_body_name,
         )
-        self.contact_observed = self.contact_observed or contact
+        self.contact_observed = self.contact_observed or current_contact
         lifted = object_z >= self.initial_object_z + self.lift_height
+        position = self.mj_data.xpos[self.object_body.id]
+        object_in_bounds = (
+            position[2] >= 0.2
+            and self.TABLE_X_BOUNDS[0] <= position[0] <= self.TABLE_X_BOUNDS[1]
+            and abs(position[1]) <= self.TABLE_ABS_Y_BOUND
+        )
 
-        if self.contact_observed and lifted:
-            if self.lift_started_at is None:
-                self.lift_started_at = task_time
-            elif task_time - self.lift_started_at >= self.hold_time:
+        if current_contact and lifted and object_in_bounds:
+            if self.lift_started_wall_time is None:
+                self.lift_started_wall_time = wall_time
+            elif wall_time - self.lift_started_wall_time >= self.hold_time:
                 self.success = True
         else:
-            self.lift_started_at = None
+            self.lift_started_wall_time = None
 
         if self.scenario == "bottle_apple":
             other = "apple" if self.target == "bottle" else "bottle"
@@ -753,9 +778,7 @@ class BottleTaskEnv(DefaultEnv):
         task_time = (
             None if self.armed_wall_time is None else wall_time - self.armed_wall_time
         )
-        simulator_time = (
-            None if self.armed_at is None else float(self.mj_data.time) - self.armed_at
-        )
+        simulator_time = None if self.armed_at is None else self.simulator_elapsed
         if not force and wall_time - self._last_metrics_write < 0.25:
             return
         self._last_metrics_write = wall_time
@@ -773,12 +796,19 @@ class BottleTaskEnv(DefaultEnv):
                 or abs(position[1]) > self.TABLE_ABS_Y_BOUND
             )
         )
+        valid_success = bool(
+            getattr(self, "success", False)
+            and not object_off_table
+            and not self.simulator_unstable
+        )
         if self.armed_at is None:
             status = "waiting"
-        elif getattr(self, "success", False):
-            status = "success"
+        elif self.simulator_unstable:
+            status = "simulator_unstable"
         elif object_off_table:
             status = "object_off_table"
+        elif valid_success:
+            status = "success"
         elif task_time >= self.task_duration:
             status = "complete"
         else:
@@ -800,10 +830,11 @@ class BottleTaskEnv(DefaultEnv):
                 hasattr(self, "max_object_z")
                 and self.max_object_z >= self.initial_object_z + self.lift_height
             ),
-            "success": getattr(self, "success", False),
+            "success": valid_success,
             "object_off_table": object_off_table,
             "wrong_object_lifted": getattr(self, "wrong_object_lifted", False),
             "robot_falls": getattr(self, "robot_falls", 0),
+            "simulator_instabilities": self.simulator_instabilities,
             "lower_body_locked": self.lock_lower_body,
             "criteria": {
                 "lift_height_m": self.lift_height,

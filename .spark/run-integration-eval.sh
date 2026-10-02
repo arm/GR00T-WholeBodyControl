@@ -272,7 +272,7 @@ for _ in $(seq 1 $((task_duration + 5))); do
   if [[ "$env_name" == "pnp_bottle" && -s "$task_metrics" ]]; then
     task_status=$("$repo/.venv_inference/bin/python" -c \
       'import json,sys; print(json.load(open(sys.argv[1]))["status"])' "$task_metrics")
-    if [[ "$task_status" == "success" || "$task_status" == "object_off_table" || "$task_status" == "complete" ]]; then
+    if [[ "$task_status" == "success" || "$task_status" == "object_off_table" || "$task_status" == "simulator_unstable" || "$task_status" == "complete" ]]; then
       echo "Task reached terminal status: $task_status"
       break
     fi
