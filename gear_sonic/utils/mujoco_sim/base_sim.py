@@ -531,6 +531,9 @@ class DefaultEnv:
 class BottleTaskEnv(DefaultEnv):
     """Deterministic bottle/apple benchmark using the published SONIC scene."""
 
+    TABLE_X_BOUNDS = (0.10, 0.70)
+    TABLE_ABS_Y_BOUND = 0.78
+
     RIGHT_HAND_BODIES = [
         "right_hand_thumb_0_link",
         "right_hand_thumb_1_link",
@@ -731,9 +734,15 @@ class BottleTaskEnv(DefaultEnv):
         self._write_metrics()
 
     def check_fall(self):
-        if self.mj_data.qpos[2] < 0.2:
-            self.robot_falls += 1
+        if self.lock_lower_body and self._locked_root_qpos is not None:
+            if self.mj_data.qpos[2] < 0.2:
+                self.robot_falls += 1
+            self.fall = False
+            self._apply_lower_body_lock()
+            return
         super().check_fall()
+        if self.fall:
+            self._last_metrics_write = -1.0
 
     def _write_metrics(self, force: bool = False):
         if not self.metrics_path:
@@ -749,7 +758,13 @@ class BottleTaskEnv(DefaultEnv):
             else None
         )
         object_off_table = bool(
-            task_time is not None and position is not None and position[2] < 0.2
+            task_time is not None
+            and position is not None
+            and (
+                position[2] < 0.2
+                or not self.TABLE_X_BOUNDS[0] <= position[0] <= self.TABLE_X_BOUNDS[1]
+                or abs(position[1]) > self.TABLE_ABS_Y_BOUND
+            )
         )
         if self.armed_at is None:
             status = "waiting"
