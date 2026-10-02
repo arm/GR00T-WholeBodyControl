@@ -577,7 +577,12 @@ else
     echo -e "${YELLOW}📋 This will start the simulation control system.${NC}"
 fi
 echo ""
-read -p "$(echo -e ${GREEN}Proceed with deployment? [Y/n]: ${NC})" confirm
+if [[ "${GROOT_WBC_AUTO_APPROVE:-}" == "YES" ]]; then
+    confirm="Y"
+    echo "Automation approval received via GROOT_WBC_AUTO_APPROVE=YES"
+else
+    read -p "$(echo -e ${GREEN}Proceed with deployment? [Y/n]: ${NC})" confirm
+fi
 
 if [[ "$confirm" =~ ^[Yy]$ ]] || [[ -z "$confirm" ]]; then
     echo ""
