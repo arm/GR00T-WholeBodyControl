@@ -540,6 +540,20 @@ class BottleTaskEnv(DefaultEnv):
         "right_hand_index_0_link",
         "right_hand_index_1_link",
     ]
+    LOWER_BODY_JOINTS = [
+        "left_hip_pitch_joint",
+        "left_hip_roll_joint",
+        "left_hip_yaw_joint",
+        "left_knee_joint",
+        "left_ankle_pitch_joint",
+        "left_ankle_roll_joint",
+        "right_hip_pitch_joint",
+        "right_hip_roll_joint",
+        "right_hip_yaw_joint",
+        "right_knee_joint",
+        "right_ankle_pitch_joint",
+        "right_ankle_roll_joint",
+    ]
 
     def __init__(
         self,
@@ -555,6 +569,7 @@ class BottleTaskEnv(DefaultEnv):
         self.seed = int(os.environ.get("GROOT_WBC_TASK_SEED", "0"))
         self.metrics_path = os.environ.get("GROOT_WBC_TASK_METRICS_PATH")
         self.arm_file = os.environ.get("GROOT_WBC_TASK_ARM_FILE")
+        self.lock_lower_body = os.environ.get("GROOT_WBC_LOCK_LOWER_BODY", "1") != "0"
         self.task_duration = float(os.environ.get("GROOT_WBC_TASK_DURATION_S", "90"))
         self.lift_height = float(os.environ.get("GROOT_WBC_TASK_LIFT_HEIGHT_M", "0.045"))
         self.hold_time = float(os.environ.get("GROOT_WBC_TASK_HOLD_TIME_S", "0.5"))
@@ -605,6 +620,8 @@ class BottleTaskEnv(DefaultEnv):
         self.wrong_object_lifted = False
         self.robot_falls = 0
         self.armed_at = None
+        self._locked_root_qpos = None
+        self._locked_lower_qpos = {}
         self._last_metrics_write = -1.0
         self._write_metrics(force=True)
 
@@ -640,9 +657,36 @@ class BottleTaskEnv(DefaultEnv):
         if self.armed_at is not None:
             return True
         if self.arm_file is None or Path(self.arm_file).exists():
+            if self.lock_lower_body:
+                self._capture_lower_body_lock()
             self.armed_at = float(self.mj_data.time)
             return True
         return False
+
+    def _capture_lower_body_lock(self):
+        self._locked_root_qpos = self.mj_data.qpos[:7].copy()
+        for joint_name in self.LOWER_BODY_JOINTS:
+            joint_id = self.mj_model.joint(joint_name).id
+            qpos_address = int(self.mj_model.jnt_qposadr[joint_id])
+            self._locked_lower_qpos[joint_name] = float(self.mj_data.qpos[qpos_address])
+
+    def _apply_lower_body_lock(self):
+        if self._locked_root_qpos is None:
+            return
+        self.mj_data.qpos[:7] = self._locked_root_qpos
+        self.mj_data.qvel[:6] = 0.0
+        for joint_name, position in self._locked_lower_qpos.items():
+            joint_id = self.mj_model.joint(joint_name).id
+            qpos_address = int(self.mj_model.jnt_qposadr[joint_id])
+            dof_address = int(self.mj_model.jnt_dofadr[joint_id])
+            self.mj_data.qpos[qpos_address] = position
+            self.mj_data.qvel[dof_address] = 0.0
+        mujoco.mj_forward(self.mj_model, self.mj_data)
+
+    def sim_step(self):
+        super().sim_step()
+        if self.lock_lower_body and self.armed_at is not None:
+            self._apply_lower_body_lock()
 
     def _object_lifted(self, body_name: str, initial_z: float) -> bool:
         body_id = self.mj_model.body(body_name).id
@@ -729,6 +773,7 @@ class BottleTaskEnv(DefaultEnv):
             "success": getattr(self, "success", False),
             "wrong_object_lifted": getattr(self, "wrong_object_lifted", False),
             "robot_falls": getattr(self, "robot_falls", 0),
+            "lower_body_locked": self.lock_lower_body,
             "criteria": {
                 "lift_height_m": self.lift_height,
                 "hold_time_s": self.hold_time,

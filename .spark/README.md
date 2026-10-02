@@ -99,7 +99,7 @@ Evidence is retained at `/home/arm-seattle-spark-02/workspaces/gr00t-wbc-results
 
 ## Bottle-task verification campaign
 
-The task evaluator restores the repository's original `pnp_bottle_43dof.xml` scene and checks its camera framing against the checkpoint's published first- and third-person simulation videos. The original evaluation harness and placement manifest were not published, so this is a pinned reconstruction rather than a claim of exact reproduction. It adds deterministic placement seeds, a bottle-plus-red-apple variant, and a machine-readable success rule: the requested object must contact the right hand and remain at least 45 mm above its initial height for 0.5 seconds. Wrong-object lifts and robot falls are recorded separately.
+The task evaluator restores the repository's original `pnp_bottle_43dof.xml` scene and checks its camera framing against the checkpoint's published first- and third-person simulation videos. The original evaluation harness and placement manifest were not published, so this is a pinned reconstruction rather than a claim of exact reproduction. As in the checkpoint's published evaluation, the floating base and twelve leg joints are captured and locked when each task trial begins; the arms, waist, and hands remain policy-controlled. The evaluator adds deterministic placement seeds, a bottle-plus-red-apple variant, and a machine-readable success rule: the requested object must contact the right hand and remain at least 45 mm above its initial height for 0.5 seconds. Wrong-object lifts and robot falls are recorded separately.
 
 Run a single task trial through the integration runner:
 
