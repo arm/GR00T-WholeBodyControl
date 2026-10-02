@@ -120,7 +120,7 @@ Run the complete 90-trial campaign—30 deterministic placements for each publis
 ```bash
 GROOT_WBC_APPROVE_EXCLUSIVE=YES \
 GROOT_WBC_TRIALS_PER_SCENARIO=30 \
-GROOT_WBC_TASK_DURATION_S=45 \
+GROOT_WBC_TASK_DURATION_S=90 \
   .spark/run-task-campaign.sh \
     "$PWD/models/sii-linzy-grab-bottle-checkpoint-10000" \
     task-campaign-20261002-v1

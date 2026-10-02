@@ -16,7 +16,10 @@ prompt="${GROOT_WBC_PROMPT:-grab the bottle}"
 task_scenario="${GROOT_WBC_TASK_SCENARIO:-single_bottle}"
 task_target="${GROOT_WBC_TASK_TARGET:-bottle}"
 task_seed="${GROOT_WBC_TASK_SEED:-0}"
-task_duration="${GROOT_WBC_TASK_DURATION_S:-45}"
+task_duration="${GROOT_WBC_TASK_DURATION_S:-}"
+if [[ -z "$task_duration" ]]; then
+  if [[ "$env_name" == "pnp_bottle" ]]; then task_duration=90; else task_duration=45; fi
+fi
 task_metrics="$result/task-metrics.json"
 task_arm_file="$result/task-armed"
 protected=(pi05-fp8-production qwen3-vl-judge triton-spark)

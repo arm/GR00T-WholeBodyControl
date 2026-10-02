@@ -532,8 +532,12 @@ class BottleTaskEnv(DefaultEnv):
     """Deterministic bottle/apple benchmark using the published SONIC scene."""
 
     RIGHT_HAND_BODIES = [
+        "right_hand_thumb_0_link",
+        "right_hand_thumb_1_link",
         "right_hand_thumb_2_link",
+        "right_hand_middle_0_link",
         "right_hand_middle_1_link",
+        "right_hand_index_0_link",
         "right_hand_index_1_link",
     ]
 
@@ -551,7 +555,7 @@ class BottleTaskEnv(DefaultEnv):
         self.seed = int(os.environ.get("GROOT_WBC_TASK_SEED", "0"))
         self.metrics_path = os.environ.get("GROOT_WBC_TASK_METRICS_PATH")
         self.arm_file = os.environ.get("GROOT_WBC_TASK_ARM_FILE")
-        self.task_duration = float(os.environ.get("GROOT_WBC_TASK_DURATION_S", "45"))
+        self.task_duration = float(os.environ.get("GROOT_WBC_TASK_DURATION_S", "90"))
         self.lift_height = float(os.environ.get("GROOT_WBC_TASK_LIFT_HEIGHT_M", "0.045"))
         self.hold_time = float(os.environ.get("GROOT_WBC_TASK_HOLD_TIME_S", "0.5"))
 
@@ -614,13 +618,16 @@ class BottleTaskEnv(DefaultEnv):
     def _place_objects(self):
         rng = np.random.default_rng(self.seed)
         if self.scenario == "single_bottle":
-            bottle_pos = np.array(
-                [0.4 + rng.uniform(-0.04, 0.04), rng.uniform(-0.10, 0.10), 0.875]
-            )
+            if self.seed == 0:
+                bottle_pos = np.array([0.4, 0.0, 0.875])
+            else:
+                bottle_pos = np.array(
+                    [0.4 + rng.uniform(-0.04, 0.04), rng.uniform(-0.10, 0.10), 0.875]
+                )
             self._set_free_body_position("bottle_body", bottle_pos)
         else:
-            jitter_x = rng.uniform(-0.035, 0.035)
-            jitter_y = rng.uniform(-0.02, 0.02)
+            jitter_x = 0.0 if self.seed == 0 else rng.uniform(-0.035, 0.035)
+            jitter_y = 0.0 if self.seed == 0 else rng.uniform(-0.02, 0.02)
             self._set_free_body_position(
                 "bottle_body", np.array([0.4 + jitter_x, -0.08 + jitter_y, 0.875])
             )
@@ -692,13 +699,23 @@ class BottleTaskEnv(DefaultEnv):
         if not force and simulator_time - self._last_metrics_write < 0.25:
             return
         self._last_metrics_write = simulator_time
-        position = self.mj_data.xpos[self.object_body.id].tolist() if hasattr(self, "object_body") else None
+        position = (
+            self.mj_data.xpos[self.object_body.id].tolist()
+            if hasattr(self, "object_body")
+            else None
+        )
         payload = {
             "schema_version": 1,
             "scenario": self.scenario,
             "target": self.target,
             "seed": self.seed,
-            "status": "waiting" if self.armed_at is None else "complete" if task_time >= self.task_duration else "running",
+            "status": (
+                "waiting"
+                if self.armed_at is None
+                else "complete"
+                if task_time >= self.task_duration
+                else "running"
+            ),
             "task_time_s": task_time,
             "task_duration_s": self.task_duration,
             "object_position": position,
