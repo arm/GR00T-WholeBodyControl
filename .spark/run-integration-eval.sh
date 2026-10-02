@@ -11,6 +11,14 @@ gr00t_root="/home/arm-seattle-spark-02/workspaces/humanoid-trt-bench/upstream/Is
 model="${1:-$repo/models/sii-linzy-grab-bottle-checkpoint-10000}"
 tag="${2:-integration-$(date -u +%Y%m%dT%H%M%SZ)}"
 result="/home/arm-seattle-spark-02/workspaces/gr00t-wbc-results/$tag"
+env_name="${GROOT_WBC_ENV_NAME:-default}"
+prompt="${GROOT_WBC_PROMPT:-grab the bottle}"
+task_scenario="${GROOT_WBC_TASK_SCENARIO:-single_bottle}"
+task_target="${GROOT_WBC_TASK_TARGET:-bottle}"
+task_seed="${GROOT_WBC_TASK_SEED:-0}"
+task_duration="${GROOT_WBC_TASK_DURATION_S:-45}"
+task_metrics="$result/task-metrics.json"
+task_arm_file="$result/task-armed"
 protected=(pi05-fp8-production qwen3-vl-judge triton-spark)
 bridge_gateway="$(docker network inspect bridge -f '{{(index .IPAM.Config 0).Gateway}}')"
 stopped=()
@@ -28,6 +36,15 @@ if [[ -e "$result" ]]; then
   exit 1
 fi
 mkdir -p "$result"
+
+if [[ ! "$task_duration" =~ ^[0-9]+$ ]] || (( task_duration < 1 )); then
+  echo "GROOT_WBC_TASK_DURATION_S must be a positive integer" >&2
+  exit 1
+fi
+if [[ "$env_name" != "default" && "$env_name" != "pnp_bottle" ]]; then
+  echo "Unsupported GROOT_WBC_ENV_NAME: $env_name" >&2
+  exit 1
+fi
 
 cleanup() {
   status=$?
@@ -51,6 +68,9 @@ cd "$repo"
 git rev-parse HEAD >"$result/source-commit.txt"
 printf '%s\n' '5fdb36c78c88b9cc3a2c584fcd8993e9955b2384' >"$result/model-revision.txt"
 sha256sum "$model"/model-*.safetensors >"$result/model-sha256.txt"
+printf 'env_name=%s\nprompt=%s\nscenario=%s\ntarget=%s\nseed=%s\nduration_s=%s\n' \
+  "$env_name" "$prompt" "$task_scenario" "$task_target" "$task_seed" "$task_duration" \
+  >"$result/evaluation-config.txt"
 docker ps --format '{{.Names}}|{{.ID}}|{{.Status}}' >"$result/containers-before.txt"
 nvidia-smi >"$result/nvidia-smi-before.txt"
 
@@ -110,7 +130,14 @@ if [[ "$policy_ready" != true ]]; then
   exit 1
 fi
 
-PYTHONUNBUFFERED=1 setsid .spark/run-sim.sh >"$result/sim.log" 2>&1 &
+GROOT_WBC_TASK_SCENARIO="$task_scenario" \
+GROOT_WBC_TASK_TARGET="$task_target" \
+GROOT_WBC_TASK_SEED="$task_seed" \
+GROOT_WBC_TASK_DURATION_S="$task_duration" \
+GROOT_WBC_TASK_METRICS_PATH="$task_metrics" \
+GROOT_WBC_TASK_ARM_FILE="$task_arm_file" \
+PYTHONUNBUFFERED=1 setsid .spark/run-sim.sh --env-name "$env_name" \
+  >"$result/sim.log" 2>&1 &
 sim_pid=$!
 sim_ready=false
 for _ in $(seq 1 60); do
@@ -169,7 +196,7 @@ PYTHONUNBUFFERED=1 setsid .spark/run-inference-client.sh \
   --host 127.0.0.1 \
   --port 5550 \
   --embodiment-tag unitree_g1_sonic \
-  --prompt 'grab the bottle' \
+  --prompt "$prompt" \
   --camera-host 127.0.0.1 \
   --camera-port 5555 \
   --action-zmq-host "$bridge_gateway" \
@@ -227,13 +254,43 @@ fi
 "$repo/.venv_inference/bin/python" .spark/send-keyboard-command.py i
 sleep 2
 "$repo/.venv_inference/bin/python" .spark/send-keyboard-command.py p
+if [[ "$env_name" == "pnp_bottle" ]]; then
+  install -m 0644 /dev/null "$task_arm_file"
+fi
 
-for _ in $(seq 1 45); do
+for _ in $(seq 1 "$task_duration"); do
   kill -0 "$client_pid"
   docker inspect -f '{{.State.Running}}' gr00t-wbc-policy | grep -qx true
   docker inspect -f '{{.State.Running}}' gr00t-wbc-controller | grep -qx true
   sleep 1
 done
+
+if [[ "$env_name" == "pnp_bottle" ]]; then
+  if [[ ! -s "$task_metrics" ]]; then
+    echo "Task evaluator did not produce metrics" >&2
+    exit 1
+  fi
+  "$repo/.venv_inference/bin/python" - "$task_metrics" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1]) as stream:
+    metrics = json.load(stream)
+required = {
+    "scenario",
+    "target",
+    "seed",
+    "contact_observed",
+    "lift_observed",
+    "success",
+    "robot_falls",
+}
+missing = required.difference(metrics)
+if missing:
+    raise SystemExit(f"Task metrics missing keys: {sorted(missing)}")
+print(json.dumps(metrics, sort_keys=True))
+PY
+fi
 
 action_chunks=$(grep -c 'New action chunk' "$result/client.log" || true)
 action_frames=$(grep -c 'ZMQ: Sent latent action' "$result/client.log" || true)

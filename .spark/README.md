@@ -1,6 +1,6 @@
 # GR00T + SONIC + Whole-Body Control on DGX Spark
 
-This directory makes the upstream four-process simulation evaluation reproducible on the ARM64 DGX Spark. It pins the source and container dependencies, builds the TensorRT controller, and provides one launcher for each process.
+This directory makes the upstream four-process simulation evaluation reproducible on the ARM64 DGX Spark. It pins the source and container dependencies, builds the TensorRT controller, and provides integration and task-level launchers.
 
 ## Status and pins
 
@@ -88,7 +88,7 @@ Use the upstream keyboard publisher to send `k` to start/stop control, `p` to pa
 
 ## Verification and operational notes
 
-The retained `integration-20261002-v7` Spark run passed end to end with 89 GR00T inference samples and 2,250 streamed SONIC latent-action frames. GR00T action-chunk latency was 179 ms median, 199.6 ms p95, and 200.12 ms p99; the camera averaged 32.51 Hz with zero dropped messages. This validates integration and runtime stability, not bottle-grasp success: the stock minimal MuJoCo scene does not contain the checkpoint's bottle task assets.
+The retained `integration-20261002-v7` Spark run passed end to end with 89 GR00T inference samples and 2,250 streamed SONIC latent-action frames. GR00T action-chunk latency was 179 ms median, 199.6 ms p95, and 200.12 ms p99; the camera averaged 32.51 Hz with zero dropped messages. This validates integration and runtime stability.
 
 Evidence is retained at `/home/arm-seattle-spark-02/workspaces/gr00t-wbc-results/integration-20261002-v7`. Recompute its metrics with:
 
@@ -96,6 +96,39 @@ Evidence is retained at `/home/arm-seattle-spark-02/workspaces/gr00t-wbc-results
 .venv_inference/bin/python .spark/analyze-eval.py \
   /home/arm-seattle-spark-02/workspaces/gr00t-wbc-results/integration-20261002-v7
 ```
+
+## Bottle-task verification campaign
+
+The task evaluator restores the repository's original `pnp_bottle_43dof.xml` scene and checks its camera framing against the checkpoint's published first- and third-person simulation videos. The original evaluation harness and placement manifest were not published, so this is a pinned reconstruction rather than a claim of exact reproduction. It adds deterministic placement seeds, a bottle-plus-red-apple variant, and a machine-readable success rule: the requested object must contact the right hand and remain at least 45 mm above its initial height for 0.5 seconds. Wrong-object lifts and robot falls are recorded separately.
+
+Run a single task trial through the integration runner:
+
+```bash
+GROOT_WBC_APPROVE_EXCLUSIVE=YES \
+GROOT_WBC_ENV_NAME=pnp_bottle \
+GROOT_WBC_TASK_SCENARIO=single_bottle \
+GROOT_WBC_TASK_TARGET=bottle \
+GROOT_WBC_TASK_SEED=0 \
+GROOT_WBC_PROMPT="grab the bottle" \
+  .spark/run-integration-eval.sh \
+    "$PWD/models/sii-linzy-grab-bottle-checkpoint-10000" \
+    task-smoke-single-bottle-seed-00
+```
+
+Run the complete 90-trial campaign—30 deterministic placements for each published scenario:
+
+```bash
+GROOT_WBC_APPROVE_EXCLUSIVE=YES \
+GROOT_WBC_TRIALS_PER_SCENARIO=30 \
+GROOT_WBC_TASK_DURATION_S=45 \
+  .spark/run-task-campaign.sh \
+    "$PWD/models/sii-linzy-grab-bottle-checkpoint-10000" \
+    task-campaign-20261002-v1
+```
+
+For a three-trial smoke campaign, set `GROOT_WBC_TRIALS_PER_SCENARIO=1`. The campaign retains per-trial logs, task metrics, latency/camera metrics, container identities, model hashes, and an evidence manifest under `/home/arm-seattle-spark-02/workspaces/gr00t-wbc-results/<tag>`.
+
+The checkpoint repository's reference videos are pinned at revision `5fdb36c78c88b9cc3a2c584fcd8993e9955b2384`. The successful reference clips used to validate camera framing have SHA256 values `b9fa72cb3522de0e3221c0ea02efd326b3712a949ca6cb268e9c6b03754243aa` for the ego view and `62e8e2d2835fe4ea90325533f842f2d5db4620f7636e46af2258aae8fe194f60` for the third-person view.
 
 - `run-sim.sh --help`, `run-inference-client.sh --help`, controller compilation, ARM64 dynamic linkage, PolicyClient construction, and SONIC message serialization have been checked on this Spark.
 - A headless simulation smoke test reached camera-server readiness on port 5655.
