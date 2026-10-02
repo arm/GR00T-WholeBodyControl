@@ -623,6 +623,7 @@ class BottleTaskEnv(DefaultEnv):
         self.wrong_object_lifted = False
         self.robot_falls = 0
         self.armed_at = None
+        self.armed_wall_time = None
         self._locked_root_qpos = None
         self._locked_lower_qpos = {}
         self._last_metrics_write = -1.0
@@ -663,6 +664,7 @@ class BottleTaskEnv(DefaultEnv):
             if self.lock_lower_body:
                 self._capture_lower_body_lock()
             self.armed_at = float(self.mj_data.time)
+            self.armed_wall_time = time.monotonic()
             return True
         return False
 
@@ -747,11 +749,16 @@ class BottleTaskEnv(DefaultEnv):
     def _write_metrics(self, force: bool = False):
         if not self.metrics_path:
             return
-        simulator_time = float(self.mj_data.time)
-        task_time = None if self.armed_at is None else float(self.mj_data.time) - self.armed_at
-        if not force and simulator_time - self._last_metrics_write < 0.25:
+        wall_time = time.monotonic()
+        task_time = (
+            None if self.armed_wall_time is None else wall_time - self.armed_wall_time
+        )
+        simulator_time = (
+            None if self.armed_at is None else float(self.mj_data.time) - self.armed_at
+        )
+        if not force and wall_time - self._last_metrics_write < 0.25:
             return
-        self._last_metrics_write = simulator_time
+        self._last_metrics_write = wall_time
         position = (
             self.mj_data.xpos[self.object_body.id].tolist()
             if hasattr(self, "object_body")
@@ -783,6 +790,7 @@ class BottleTaskEnv(DefaultEnv):
             "seed": self.seed,
             "status": status,
             "task_time_s": task_time,
+            "simulator_time_s": simulator_time,
             "task_duration_s": self.task_duration,
             "object_position": position,
             "initial_object_z": getattr(self, "initial_object_z", None),

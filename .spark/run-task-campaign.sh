@@ -236,7 +236,7 @@ run_trial() {
   "$repo/.venv_inference/bin/python" .spark/send-keyboard-command.py p
   install -m 0644 /dev/null "$task_arm_file"
 
-  for _ in $(seq 1 "$task_duration"); do
+  for _ in $(seq 1 $((task_duration + 5))); do
     kill -0 "$client_pid"
     docker inspect -f '{{.State.Running}}' gr00t-wbc-policy | grep -qx true
     docker inspect -f '{{.State.Running}}' gr00t-wbc-controller | grep -qx true
@@ -244,7 +244,7 @@ run_trial() {
     if [[ -s "$task_metrics" ]]; then
       task_status=$("$repo/.venv_inference/bin/python" -c \
         'import json,sys; print(json.load(open(sys.argv[1]))["status"])' "$task_metrics")
-      if [[ "$task_status" == "success" || "$task_status" == "object_off_table" ]]; then
+      if [[ "$task_status" == "success" || "$task_status" == "object_off_table" || "$task_status" == "complete" ]]; then
         echo "Trial $trial_name reached terminal status: $task_status"
         break
       fi

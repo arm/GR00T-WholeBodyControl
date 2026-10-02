@@ -38,6 +38,8 @@ def main() -> None:
             raise SystemExit(f"Incomplete trial: {trial_dir}")
         task = json.loads(task_path.read_text())
         performance = json.loads(performance_path.read_text())
+        if task["status"] not in {"success", "object_off_table", "complete"}:
+            raise SystemExit(f"Nonterminal task metrics in {trial_dir}: {task['status']}")
         trials.append(
             {
                 "name": trial_dir.name,
@@ -46,6 +48,7 @@ def main() -> None:
                 "seed": task["seed"],
                 "status": task["status"],
                 "task_time_s": task["task_time_s"],
+                "simulator_time_s": task["simulator_time_s"],
                 "success": task["success"],
                 "object_off_table": task["object_off_table"],
                 "contact_observed": task["contact_observed"],
