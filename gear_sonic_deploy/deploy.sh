@@ -124,6 +124,12 @@ resolve_interface() {
     fi
     
     if [[ "$interface" == "sim" ]]; then
+        if [[ -n "${GROOT_WBC_SIM_INTERFACE:-}" ]]; then
+            TARGET="$GROOT_WBC_SIM_INTERFACE"
+            ENV_TYPE="sim"
+            return 0
+        fi
+
         local lo_interface
         lo_interface=$(find_interface_by_ip "127.0.0.1")
         
