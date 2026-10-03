@@ -130,6 +130,31 @@ For a three-trial smoke campaign, set `GROOT_WBC_TRIALS_PER_SCENARIO=1`. A trial
 
 If the exclusive shell is interrupted, rerun the same command and tag with `GROOT_WBC_RESUME=YES`. The runner verifies that evaluator code has not changed, archives incomplete trial evidence, skips complete terminal trials, records the resume commit, and emits `campaign-complete` only after aggregation. An interrupted cleanup cannot report exit code zero without that marker.
 
+### Retained DGX Spark result
+
+The authoritative `task-campaign-20261002-v6` campaign completed all 90 trials with zero harness-level technical failures and zero task successes. Each scenario's 95% Wilson upper bound is 11.35%. The integration is technically healthy, but the community checkpoint does not satisfy this reconstructed task benchmark's continuous-contact, 45 mm lift, and 0.5-second hold criterion.
+
+| Scenario / requested object | Success | Contact trials | Lift trials | Off-table observations | Unstable trials | Mean of per-trial median / p95 latency | Mean camera rate |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Single bottle / bottle | 0/30 | 10 | 17 | 26 | 3 | 184.27 / 255.27 ms | 31.99 Hz |
+| Bottle + apple / bottle | 0/30 | 8 | 16 | 25 | 0 | 184.32 / 319.00 ms | 31.97 Hz |
+| Bottle + apple / apple | 0/30 | 7 | 1 | 18 | 3 | 169.82 / 229.76 ms | 32.19 Hz |
+
+The apple-target block also recorded 12 wrong-object lifts. A historical contact or lift alone is not a success: current right-hand contact must remain present for the complete in-bounds hold. The campaign recorded 67 `object_off_table`, 17 full-duration `complete`, and 6 `simulator_unstable` terminal outcomes. Camera transport dropped zero messages.
+
+Evidence is retained on the Spark at:
+
+```text
+/home/arm-seattle-spark-02/workspaces/gr00t-wbc-results/task-campaign-20261002-v6
+```
+
+The campaign used evaluator commit `88ea8c285e6262116f14fb7edec35e8260e90b4c`; resume orchestration was added in `615092c99dcd28ff1f3dce1f12c8d44fac2e4863` without changing evaluator code. `campaign-metrics.json` has SHA256 `55cb20cec0e55c1658309d8d90644eb2ae5bd860aa3e4cee448d2646d3c90d2b`. Verify the 747-file evidence manifest with:
+
+```bash
+cd /home/arm-seattle-spark-02/workspaces/gr00t-wbc-results/task-campaign-20261002-v6
+sha256sum -c evidence.sha256
+```
+
 The checkpoint repository's reference videos are pinned at revision `5fdb36c78c88b9cc3a2c584fcd8993e9955b2384`. The successful reference clips used to validate camera framing have SHA256 values `b9fa72cb3522de0e3221c0ea02efd326b3712a949ca6cb268e9c6b03754243aa` for the ego view and `62e8e2d2835fe4ea90325533f842f2d5db4620f7636e46af2258aae8fe194f60` for the third-person view.
 
 - `run-sim.sh --help`, `run-inference-client.sh --help`, controller compilation, ARM64 dynamic linkage, PolicyClient construction, and SONIC message serialization have been checked on this Spark.
