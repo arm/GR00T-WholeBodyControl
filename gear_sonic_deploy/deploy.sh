@@ -124,6 +124,12 @@ resolve_interface() {
     fi
     
     if [[ "$interface" == "sim" ]]; then
+        if [[ -n "${GROOT_WBC_SIM_INTERFACE:-}" ]]; then
+            TARGET="$GROOT_WBC_SIM_INTERFACE"
+            ENV_TYPE="sim"
+            return 0
+        fi
+
         local lo_interface
         lo_interface=$(find_interface_by_ip "127.0.0.1")
         
@@ -571,7 +577,12 @@ else
     echo -e "${YELLOW}📋 This will start the simulation control system.${NC}"
 fi
 echo ""
-read -p "$(echo -e ${GREEN}Proceed with deployment? [Y/n]: ${NC})" confirm
+if [[ "${GROOT_WBC_AUTO_APPROVE:-}" == "YES" ]]; then
+    confirm="Y"
+    echo "Automation approval received via GROOT_WBC_AUTO_APPROVE=YES"
+else
+    read -p "$(echo -e ${GREEN}Proceed with deployment? [Y/n]: ${NC})" confirm
+fi
 
 if [[ "$confirm" =~ ^[Yy]$ ]] || [[ -z "$confirm" ]]; then
     echo ""

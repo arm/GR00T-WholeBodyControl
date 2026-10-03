@@ -5,6 +5,7 @@ commands, steps physics, and publishes observations back via the SDK bridge.
 BaseSimulator wraps DefaultEnv with rate-limiting and viewer/image update loops.
 """
 
+import json
 import os
 import pathlib
 from pathlib import Path
@@ -527,6 +528,333 @@ class DefaultEnv:
         mujoco.mj_resetData(self.mj_model, self.mj_data)
 
 
+class BottleTaskEnv(DefaultEnv):
+    """Deterministic bottle/apple benchmark using the published SONIC scene."""
+
+    TABLE_X_BOUNDS = (0.10, 0.70)
+    TABLE_ABS_Y_BOUND = 0.78
+
+    RIGHT_HAND_BODIES = [
+        "right_hand_thumb_0_link",
+        "right_hand_thumb_1_link",
+        "right_hand_thumb_2_link",
+        "right_hand_middle_0_link",
+        "right_hand_middle_1_link",
+        "right_hand_index_0_link",
+        "right_hand_index_1_link",
+    ]
+    LOWER_BODY_JOINTS = [
+        "left_hip_pitch_joint",
+        "left_hip_roll_joint",
+        "left_hip_yaw_joint",
+        "left_knee_joint",
+        "left_ankle_pitch_joint",
+        "left_ankle_roll_joint",
+        "right_hip_pitch_joint",
+        "right_hip_roll_joint",
+        "right_hip_yaw_joint",
+        "right_knee_joint",
+        "right_ankle_pitch_joint",
+        "right_ankle_roll_joint",
+    ]
+
+    def __init__(
+        self,
+        config: Dict[str, any],
+        env_name: str = "pnp_bottle",
+        onscreen: bool = False,
+        offscreen: bool = False,
+        enable_image_publish: bool = False,
+    ):
+        config = config.copy()
+        self.scenario = os.environ.get("GROOT_WBC_TASK_SCENARIO", "single_bottle")
+        self.target = os.environ.get("GROOT_WBC_TASK_TARGET", "bottle")
+        self.seed = int(os.environ.get("GROOT_WBC_TASK_SEED", "0"))
+        self.metrics_path = os.environ.get("GROOT_WBC_TASK_METRICS_PATH")
+        self.arm_file = os.environ.get("GROOT_WBC_TASK_ARM_FILE")
+        self.lock_lower_body = os.environ.get("GROOT_WBC_LOCK_LOWER_BODY", "1") != "0"
+        self.task_duration = float(os.environ.get("GROOT_WBC_TASK_DURATION_S", "90"))
+        self.lift_height = float(os.environ.get("GROOT_WBC_TASK_LIFT_HEIGHT_M", "0.045"))
+        self.hold_time = float(os.environ.get("GROOT_WBC_TASK_HOLD_TIME_S", "0.5"))
+
+        if self.scenario == "single_bottle":
+            config["ROBOT_SCENE"] = (
+                "decoupled_wbc/control/robot_model/model_data/g1/pnp_bottle_43dof.xml"
+            )
+        elif self.scenario == "bottle_apple":
+            config["ROBOT_SCENE"] = (
+                "decoupled_wbc/control/robot_model/model_data/g1/"
+                "pnp_bottle_apple_43dof.xml"
+            )
+        else:
+            raise ValueError(f"Unsupported task scenario: {self.scenario}")
+
+        if self.target not in {"bottle", "apple"}:
+            raise ValueError(f"Unsupported task target: {self.target}")
+        if self.target == "apple" and self.scenario != "bottle_apple":
+            raise ValueError("The apple target requires the bottle_apple scenario")
+
+        camera_configs = {
+            "ego_view": {
+                "height": 400,
+                "width": 400,
+                "mjcf_name": "egoview",
+            },
+        }
+        super().__init__(
+            config,
+            env_name,
+            camera_configs,
+            onscreen,
+            offscreen,
+            enable_image_publish,
+        )
+
+        self._place_objects()
+        self.object_body_name = f"{self.target}_body"
+        self.object_geom_name = self.target
+        self.object_body = self.mj_model.body(self.object_body_name)
+        self.object_geom = self.mj_model.geom(self.object_geom_name)
+        self.initial_object_z = float(self.mj_data.xpos[self.object_body.id][2])
+        self.max_object_z = self.initial_object_z
+        self.contact_observed = False
+        self.lift_started_wall_time = None
+        self.success = False
+        self.wrong_object_lifted = False
+        self.robot_falls = 0
+        self.simulator_instabilities = 0
+        self.simulator_unstable = False
+        self.armed_at = None
+        self.armed_wall_time = None
+        self.simulator_elapsed = 0.0
+        self._locked_root_qpos = None
+        self._locked_lower_qpos = {}
+        self._last_metrics_write = -1.0
+        self._write_metrics(force=True)
+
+    def _set_free_body_position(self, body_name: str, position: np.ndarray):
+        body_id = self.mj_model.body(body_name).id
+        joint_id = int(self.mj_model.body_jntadr[body_id])
+        qpos_address = int(self.mj_model.jnt_qposadr[joint_id])
+        self.mj_data.qpos[qpos_address : qpos_address + 3] = position
+        self.mj_model.qpos0[qpos_address : qpos_address + 3] = position
+
+    def _place_objects(self):
+        rng = np.random.default_rng(self.seed)
+        if self.scenario == "single_bottle":
+            if self.seed == 0:
+                bottle_pos = np.array([0.4, 0.0, 0.875])
+            else:
+                bottle_pos = np.array(
+                    [0.4 + rng.uniform(-0.04, 0.04), rng.uniform(-0.10, 0.10), 0.875]
+                )
+            self._set_free_body_position("bottle_body", bottle_pos)
+        else:
+            jitter_x = 0.0 if self.seed == 0 else rng.uniform(-0.035, 0.035)
+            jitter_y = 0.0 if self.seed == 0 else rng.uniform(-0.02, 0.02)
+            self._set_free_body_position(
+                "bottle_body", np.array([0.4 + jitter_x, -0.08 + jitter_y, 0.875])
+            )
+            self._set_free_body_position(
+                "apple_body", np.array([0.4 - jitter_x, 0.08 - jitter_y, 0.842])
+            )
+        mujoco.mj_forward(self.mj_model, self.mj_data)
+
+    def _is_armed(self) -> bool:
+        if self.armed_at is not None:
+            return True
+        if self.arm_file is None or Path(self.arm_file).exists():
+            if self.lock_lower_body:
+                self._capture_lower_body_lock()
+            self.armed_at = float(self.mj_data.time)
+            self.armed_wall_time = time.monotonic()
+            return True
+        return False
+
+    def _capture_lower_body_lock(self):
+        self._locked_root_qpos = self.mj_data.qpos[:7].copy()
+        for joint_name in self.LOWER_BODY_JOINTS:
+            joint_id = self.mj_model.joint(joint_name).id
+            qpos_address = int(self.mj_model.jnt_qposadr[joint_id])
+            self._locked_lower_qpos[joint_name] = float(self.mj_data.qpos[qpos_address])
+
+    def _apply_lower_body_lock(self):
+        if self._locked_root_qpos is None:
+            return
+        self.mj_data.qpos[:7] = self._locked_root_qpos
+        self.mj_data.qvel[:6] = 0.0
+        for joint_name, position in self._locked_lower_qpos.items():
+            joint_id = self.mj_model.joint(joint_name).id
+            qpos_address = int(self.mj_model.jnt_qposadr[joint_id])
+            dof_address = int(self.mj_model.jnt_dofadr[joint_id])
+            self.mj_data.qpos[qpos_address] = position
+            self.mj_data.qvel[dof_address] = 0.0
+        mujoco.mj_forward(self.mj_model, self.mj_data)
+
+    def sim_step(self):
+        previous_sim_time = float(self.mj_data.time)
+        super().sim_step()
+        current_sim_time = float(self.mj_data.time)
+        state_is_finite = all(
+            np.all(np.isfinite(values))
+            for values in (self.mj_data.qpos, self.mj_data.qvel, self.mj_data.qacc)
+        )
+        if self.armed_at is not None:
+            if current_sim_time + 1e-9 < previous_sim_time or not state_is_finite:
+                self.simulator_instabilities += 1
+                self.simulator_unstable = True
+            else:
+                self.simulator_elapsed += current_sim_time - previous_sim_time
+        if self.lock_lower_body and self.armed_at is not None:
+            self._apply_lower_body_lock()
+
+    def _object_lifted(self, body_name: str, initial_z: float) -> bool:
+        body_id = self.mj_model.body(body_name).id
+        return float(self.mj_data.xpos[body_id][2]) >= initial_z + self.lift_height
+
+    def update_reward(self):
+        if not self._is_armed():
+            self._write_metrics()
+            return
+
+        if self.simulator_unstable:
+            self._write_metrics(force=True)
+            return
+
+        wall_time = time.monotonic()
+        object_z = float(self.mj_data.xpos[self.object_body.id][2])
+        self.max_object_z = max(self.max_object_z, object_z)
+        current_contact = check_contact(
+            self.mj_model,
+            self.mj_data,
+            self.RIGHT_HAND_BODIES,
+            self.object_body_name,
+        )
+        self.contact_observed = self.contact_observed or current_contact
+        lifted = object_z >= self.initial_object_z + self.lift_height
+        position = self.mj_data.xpos[self.object_body.id]
+        object_in_bounds = (
+            position[2] >= 0.2
+            and self.TABLE_X_BOUNDS[0] <= position[0] <= self.TABLE_X_BOUNDS[1]
+            and abs(position[1]) <= self.TABLE_ABS_Y_BOUND
+        )
+
+        if current_contact and lifted and object_in_bounds:
+            if self.lift_started_wall_time is None:
+                self.lift_started_wall_time = wall_time
+            elif wall_time - self.lift_started_wall_time >= self.hold_time:
+                self.success = True
+        else:
+            self.lift_started_wall_time = None
+
+        if self.scenario == "bottle_apple":
+            other = "apple" if self.target == "bottle" else "bottle"
+            other_body = self.mj_model.body(f"{other}_body")
+            other_initial_z = 0.842 if other == "apple" else 0.875
+            self.wrong_object_lifted = self.wrong_object_lifted or (
+                float(self.mj_data.xpos[other_body.id][2])
+                >= other_initial_z + self.lift_height
+            )
+
+        with self.reward_lock:
+            self.last_reward = float(self.success)
+        self._write_metrics()
+
+    def check_fall(self):
+        if self.lock_lower_body and self._locked_root_qpos is not None:
+            if self.mj_data.qpos[2] < 0.2:
+                self.robot_falls += 1
+            self.fall = False
+            self._apply_lower_body_lock()
+            return
+        super().check_fall()
+        if self.fall:
+            self._last_metrics_write = -1.0
+
+    def _write_metrics(self, force: bool = False):
+        if not self.metrics_path:
+            return
+        wall_time = time.monotonic()
+        task_time = (
+            None if self.armed_wall_time is None else wall_time - self.armed_wall_time
+        )
+        simulator_time = None if self.armed_at is None else self.simulator_elapsed
+        if not force and wall_time - self._last_metrics_write < 0.25:
+            return
+        self._last_metrics_write = wall_time
+        position = (
+            self.mj_data.xpos[self.object_body.id].tolist()
+            if hasattr(self, "object_body")
+            else None
+        )
+        object_off_table = bool(
+            task_time is not None
+            and position is not None
+            and (
+                position[2] < 0.2
+                or not self.TABLE_X_BOUNDS[0] <= position[0] <= self.TABLE_X_BOUNDS[1]
+                or abs(position[1]) > self.TABLE_ABS_Y_BOUND
+            )
+        )
+        valid_success = bool(
+            getattr(self, "success", False)
+            and not object_off_table
+            and not self.simulator_unstable
+        )
+        if self.armed_at is None:
+            status = "waiting"
+        elif self.simulator_unstable:
+            status = "simulator_unstable"
+        elif object_off_table:
+            status = "object_off_table"
+        elif valid_success:
+            status = "success"
+        elif task_time >= self.task_duration:
+            status = "complete"
+        else:
+            status = "running"
+        payload = {
+            "schema_version": 1,
+            "scenario": self.scenario,
+            "target": self.target,
+            "seed": self.seed,
+            "status": status,
+            "task_time_s": task_time,
+            "simulator_time_s": simulator_time,
+            "task_duration_s": self.task_duration,
+            "object_position": position,
+            "initial_object_z": getattr(self, "initial_object_z", None),
+            "max_object_z": getattr(self, "max_object_z", None),
+            "contact_observed": getattr(self, "contact_observed", False),
+            "lift_observed": bool(
+                hasattr(self, "max_object_z")
+                and self.max_object_z >= self.initial_object_z + self.lift_height
+            ),
+            "success": valid_success,
+            "object_off_table": object_off_table,
+            "wrong_object_lifted": getattr(self, "wrong_object_lifted", False),
+            "robot_falls": getattr(self, "robot_falls", 0),
+            "simulator_instabilities": self.simulator_instabilities,
+            "lower_body_locked": self.lock_lower_body,
+            "criteria": {
+                "lift_height_m": self.lift_height,
+                "hold_time_s": self.hold_time,
+                "requires_right_hand_contact": True,
+            },
+        }
+        path = Path(self.metrics_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(path.suffix + ".tmp")
+        temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+        os.replace(temporary, path)
+
+    def get_privileged_obs(self):
+        return {
+            f"{self.target}_pos": self.mj_data.xpos[self.object_body.id].copy(),
+            f"{self.target}_quat": self.mj_data.xquat[self.object_body.id].copy(),
+        }
+
+
 class BaseSimulator:
     """Base simulator class that handles initialization and running of simulations"""
 
@@ -553,10 +881,12 @@ class BaseSimulator:
         # Create the environment
         if env_name == "default":
             self.sim_env = DefaultEnv(config, env_name, **kwargs)
+        elif env_name == "pnp_bottle":
+            self.sim_env = BottleTaskEnv(config, env_name, **kwargs)
         else:
             raise ValueError(
                 f"Invalid environment name: {env_name}. "
-                f"Only 'default' is supported in this minimal build."
+                f"Supported environments are 'default' and 'pnp_bottle'."
             )
 
         try:
