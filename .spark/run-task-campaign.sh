@@ -13,6 +13,8 @@ tag="${2:-task-campaign-$(date -u +%Y%m%dT%H%M%SZ)}"
 result="/home/arm-seattle-spark-02/workspaces/gr00t-wbc-results/$tag"
 trials_per_scenario="${GROOT_WBC_TRIALS_PER_SCENARIO:-30}"
 task_duration="${GROOT_WBC_TASK_DURATION_S:-90}"
+resume="${GROOT_WBC_RESUME:-NO}"
+resuming=false
 protected=(pi05-fp8-production qwen3-vl-judge triton-spark)
 bridge_gateway="$(docker network inspect bridge -f '{{(index .IPAM.Config 0).Gateway}}')"
 stopped=()
@@ -33,9 +35,27 @@ if [[ ! -f "$model/config.json" ]]; then
   echo "Invalid checkpoint directory: $model" >&2
   exit 1
 fi
-if [[ -e "$result" ]]; then
+if [[ -e "$result" && "$resume" != "YES" ]]; then
   echo "Result tag already exists: $result" >&2
   exit 1
+fi
+if [[ -e "$result" ]]; then
+  resuming=true
+  [[ -f "$result/source-commit.txt" ]] || {
+    echo "Cannot resume result without source-commit.txt: $result" >&2
+    exit 1
+  }
+  original_commit=$(<"$result/source-commit.txt")
+  if ! git -C "$repo" diff --quiet "$original_commit" HEAD -- \
+      gear_sonic/utils/mujoco_sim/base_sim.py .spark/analyze-task-campaign.py; then
+    echo "Evaluator changed since the campaign began; refusing mixed-code resume." >&2
+    exit 1
+  fi
+  interruption="$(date -u +%Y%m%dT%H%M%SZ)"
+  mkdir -p "$result/interrupted-trials" "$result/interruptions/$interruption"
+  for artifact in evidence.sha256 exit-code.txt containers-after.txt nvidia-smi-after.txt; do
+    [[ ! -e "$result/$artifact" ]] || mv "$result/$artifact" "$result/interruptions/$interruption/$artifact"
+  done
 fi
 mkdir -p "$result/trials"
 
@@ -64,6 +84,9 @@ cleanup() {
   sleep 5
   docker ps --format '{{.Names}}|{{.ID}}|{{.Status}}' >"$result/containers-after.txt" 2>&1
   nvidia-smi >"$result/nvidia-smi-after.txt" 2>&1
+  if [[ ! -f "$result/campaign-complete" && "$status" -eq 0 ]]; then
+    status=125
+  fi
   printf '%s\n' "$status" >"$result/exit-code.txt"
   find "$result" -type f ! -name evidence.sha256 -print0 \
     | sort -z \
@@ -74,11 +97,15 @@ trap 'exit 130' INT
 trap 'exit 143' TERM HUP
 
 cd "$repo"
-git rev-parse HEAD >"$result/source-commit.txt"
-printf '%s\n' '5fdb36c78c88b9cc3a2c584fcd8993e9955b2384' >"$result/model-revision.txt"
-sha256sum "$model"/model-*.safetensors >"$result/model-sha256.txt"
-printf 'trials_per_scenario=%s\ntask_duration_s=%s\n' \
-  "$trials_per_scenario" "$task_duration" >"$result/campaign-config.txt"
+if [[ "$resuming" == true ]]; then
+  git rev-parse HEAD >"$result/resume-commit.txt"
+else
+  git rev-parse HEAD >"$result/source-commit.txt"
+  printf '%s\n' '5fdb36c78c88b9cc3a2c584fcd8993e9955b2384' >"$result/model-revision.txt"
+  sha256sum "$model"/model-*.safetensors >"$result/model-sha256.txt"
+  printf 'trials_per_scenario=%s\ntask_duration_s=%s\n' \
+    "$trials_per_scenario" "$task_duration" >"$result/campaign-config.txt"
+fi
 docker ps --format '{{.Names}}|{{.ID}}|{{.Status}}' >"$result/containers-before.txt"
 nvidia-smi >"$result/nvidia-smi-before.txt"
 
@@ -284,6 +311,25 @@ prompts=('grab the bottle' 'grab the bottle' 'grab the red apple')
 
 for index in "${!scenarios[@]}"; do
   for seed in $(seq 0 $((trials_per_scenario - 1))); do
+    trial_name="${scenarios[$index]}-${targets[$index]}-seed-$(printf '%02d' "$seed")"
+    trial_result="$result/trials/$trial_name"
+    if [[ -f "$trial_result/task-metrics.json" \
+        && -f "$trial_result/performance.json" \
+        && -f "$trial_result/summary.txt" ]]; then
+      task_status=$("$repo/.venv_inference/bin/python" -c \
+        'import json,sys; print(json.load(open(sys.argv[1]))["status"])' \
+        "$trial_result/task-metrics.json")
+      if [[ "$task_status" == "success" || "$task_status" == "object_off_table" \
+          || "$task_status" == "simulator_unstable" || "$task_status" == "complete" ]]; then
+        echo "Skipping completed $trial_name ($task_status)"
+        continue
+      fi
+    fi
+    if [[ -e "$trial_result" ]]; then
+      archived="$result/interrupted-trials/$trial_name-$(date -u +%Y%m%dT%H%M%SZ)"
+      echo "Archiving incomplete $trial_name as ${archived##*/}"
+      mv "$trial_result" "$archived"
+    fi
     echo "Starting ${scenarios[$index]}/${targets[$index]} seed=$seed"
     run_trial "${scenarios[$index]}" "${targets[$index]}" "${prompts[$index]}" "$seed"
   done
@@ -292,4 +338,5 @@ done
 nvidia-smi >"$result/nvidia-smi-evaluation.txt"
 "$repo/.venv_inference/bin/python" .spark/analyze-task-campaign.py "$result" \
   >"$result/campaign-metrics.json"
+install -m 0644 /dev/null "$result/campaign-complete"
 cat "$result/campaign-metrics.json"
