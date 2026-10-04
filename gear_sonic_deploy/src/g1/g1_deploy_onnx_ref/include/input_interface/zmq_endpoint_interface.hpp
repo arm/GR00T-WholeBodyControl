@@ -64,6 +64,7 @@
 #include <mutex>
 #include <string>
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <limits>
 
@@ -731,6 +732,7 @@ private:
             
             // Log for debugging (show first token value and frame info if available)
             std::string frame_info = "";
+            int64_t trace_frame_index = -1;
             if (frame_index_idx >= 0) {
                 const auto& frame_idx_field = buffered_header_.fields[static_cast<size_t>(frame_index_idx)];
                 const auto& frame_idx_buf = buffered_buffers_[static_cast<size_t>(frame_index_idx)];
@@ -738,6 +740,7 @@ private:
                     int64_t frame_val;
                     std::memcpy(&frame_val, frame_idx_buf.data(), sizeof(int64_t));
                     if (needs_swap) frame_val = byte_swap(frame_val);
+                    trace_frame_index = frame_val;
                     frame_info = ", frame_index: " + std::to_string(frame_val);
                 } else if (frame_idx_field.dtype == "i64" && frame_idx_buf.size() > sizeof(int64_t)) {
                     // Chunk mode: show range
@@ -755,6 +758,26 @@ private:
             }
             std::cout << "[ZMQEndpointInterface] Protocol v4: Received " << token_dim 
                       << "D token (latent action), tokens[0]=" << token_data[0] << frame_info << std::endl;
+            static const bool trace_events_enabled = [] {
+                const char* value = std::getenv("GROOT_WBC_TRACE_EVENTS");
+                if (value == nullptr) return false;
+                const std::string setting(value);
+                return !setting.empty() && setting != "0" && setting != "false"
+                    && setting != "no" && setting != "off";
+            }();
+            if (trace_events_enabled && trace_frame_index >= 0) {
+                const auto mono_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count();
+                const auto wall_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::system_clock::now().time_since_epoch()).count();
+                std::cout << "GROOT_TRACE {\"schema_version\":1,"
+                          << "\"source\":\"wbc\","
+                          << "\"event\":\"action_received\","
+                          << "\"mono_ns\":" << mono_ns << ","
+                          << "\"wall_ns\":" << wall_ns << ","
+                          << "\"frame_index\":" << trace_frame_index << ","
+                          << "\"token_dim\":" << token_dim << "}" << std::endl;
+            }
             
             // Store tokens in the external token state buffer (inherited from InputInterface)
             result.token_data = std::move(token_data);

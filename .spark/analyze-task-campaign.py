@@ -38,6 +38,10 @@ def main() -> None:
             raise SystemExit(f"Incomplete trial: {trial_dir}")
         task = json.loads(task_path.read_text())
         performance = json.loads(performance_path.read_text())
+        realtime_path = trial_dir / "realtime-trace.json"
+        realtime = (
+            json.loads(realtime_path.read_text()) if realtime_path.exists() else None
+        )
         if task["status"] not in {"success", "object_off_table", "simulator_unstable", "complete"}:
             raise SystemExit(f"Nonterminal task metrics in {trial_dir}: {task['status']}")
         trials.append(
@@ -59,6 +63,7 @@ def main() -> None:
                 "latency_ms": performance["latency_ms"],
                 "camera_frequency_hz": performance["camera_frequency_hz"],
                 "camera_dropped_messages": performance["camera_dropped_messages"],
+                "realtime": realtime,
             }
         )
 
@@ -70,7 +75,7 @@ def main() -> None:
     for (scenario, target), members in groups.items():
         successes = sum(bool(member["success"]) for member in members)
         key = f"{scenario}/{target}"
-        scenarios[key] = {
+        scenario_metrics = {
             "trials": len(members),
             "successes": successes,
             "success_rate": successes / len(members),
@@ -103,6 +108,74 @@ def main() -> None:
                 member["camera_dropped_messages"] for member in members
             ),
         }
+        realtime_members = [
+            member["realtime"] for member in members if member["realtime"] is not None
+        ]
+        if realtime_members:
+            scenario_metrics["realtime"] = {
+                "trials": len(realtime_members),
+                "inference_latency_ms": {
+                    "mean_of_means": statistics.fmean(
+                        member["inference_latency_ms"]["mean"]
+                        for member in realtime_members
+                    ),
+                    "p95_mean": statistics.fmean(
+                        member["inference_latency_ms"]["p95"]
+                        for member in realtime_members
+                    ),
+                    "max": max(
+                        member["inference_latency_ms"]["max"]
+                        for member in realtime_members
+                    ),
+                },
+                "action_transport_ms": {
+                    "mean_of_means": statistics.fmean(
+                        member["action_transport_ms"]["mean"]
+                        for member in realtime_members
+                    ),
+                    "p95_mean": statistics.fmean(
+                        member["action_transport_ms"]["p95"]
+                        for member in realtime_members
+                    ),
+                    "max": max(
+                        member["action_transport_ms"]["max"]
+                        for member in realtime_members
+                    ),
+                },
+                "horizon_margin_ms": {
+                    "mean_of_means": statistics.fmean(
+                        member["horizon_margin_ms"]["mean"]
+                        for member in realtime_members
+                    ),
+                    "min": min(
+                        member["horizon_margin_ms"]["min"]
+                        for member in realtime_members
+                    ),
+                },
+                "publish_deadlines": {
+                    "over_1_5x": sum(
+                        member["publish_deadlines"]["over_1_5x"]
+                        for member in realtime_members
+                    ),
+                    "over_2x": sum(
+                        member["publish_deadlines"]["over_2x"]
+                        for member in realtime_members
+                    ),
+                },
+                "frame_continuity": {
+                    key: sum(
+                        member["frame_continuity"][key]
+                        for member in realtime_members
+                    )
+                    for key in (
+                        "gaps",
+                        "duplicates",
+                        "out_of_order",
+                        "unmatched_published",
+                    )
+                },
+            }
+        scenarios[key] = scenario_metrics
 
     output = {
         "schema_version": 1,

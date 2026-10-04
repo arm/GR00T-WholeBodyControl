@@ -44,6 +44,7 @@ from gear_sonic.utils.data_collection.telemetry import Telemetry
 from gear_sonic.utils.data_collection.transforms import compute_projected_gravity
 from gear_sonic.utils.data_collection.zmq_state_subscriber import ZMQStateSubscriber
 from gear_sonic.utils.inference.initial_poses import LATENT_INITIAL_MOTION_TOKEN
+from gear_sonic.utils.inference.realtime_trace import EventTracer
 from gear_sonic.utils.inference.vla_utils import (
     calculate_latency_compensated_index,
     concat_action,
@@ -67,6 +68,7 @@ _OBSERVATION_TRACE = None
 _OBSERVATION_TRACE_PATH = None
 _ACTION_TRACE = None
 _ACTION_TRACE_PATH = None
+_TRACE = EventTracer("vla_client")
 
 
 def _start_ego_video_override() -> None:
@@ -560,29 +562,53 @@ def _inference_worker_loop(
     while not stop_event.is_set():
         try:
             try:
-                inference_queue.get(timeout=0.1)
+                chunk_id = inference_queue.get(timeout=0.1)
             except queue.Empty:
                 continue
 
             busy_event.set()
             try:
                 inference_start_time = time.monotonic()
+                inference_start_ns = time.monotonic_ns()
+                _TRACE.emit("inference_started", chunk_id=chunk_id)
+                observation_start_ns = time.monotonic_ns()
                 observation = prepare_obs_fn()
+                observation_ns = time.monotonic_ns() - observation_start_ns
                 if observation is None:
+                    _TRACE.emit(
+                        "observation_unavailable",
+                        chunk_id=chunk_id,
+                        observation_ns=observation_ns,
+                    )
                     print("[DEBUG] Worker thread: Observation is None, skipping", flush=True)
                     continue
 
                 processed_action = inference_fn(observation)
+                duration_ns = time.monotonic_ns() - inference_start_ns
+                _TRACE.emit(
+                    "inference_completed",
+                    chunk_id=chunk_id,
+                    duration_ns=duration_ns,
+                    observation_ns=observation_ns,
+                    action_available=processed_action is not None,
+                )
 
                 if processed_action is not None:
+                    result = (
+                        processed_action,
+                        inference_start_time,
+                        chunk_id,
+                        duration_ns,
+                        observation_ns,
+                    )
                     try:
-                        result_queue.put_nowait((processed_action, inference_start_time))
+                        result_queue.put_nowait(result)
                     except queue.Full:
                         try:
                             result_queue.get_nowait()
-                            result_queue.put_nowait((processed_action, inference_start_time))
+                            result_queue.put_nowait(result)
                         except queue.Empty:
-                            result_queue.put_nowait((processed_action, inference_start_time))
+                            result_queue.put_nowait(result)
             finally:
                 busy_event.clear()
         except Exception as e:
@@ -615,6 +641,12 @@ def _map_normalized_grip_action(action: np.ndarray, closed_pose: np.ndarray) -> 
 
 def main(config: InferenceConfig):
     pause_loop = True
+    _TRACE.emit(
+        "client_started",
+        action_publish_rate_hz=config.action_publish_rate,
+        action_horizon=config.action_horizon,
+        inference_interval_s=1.0 / config.rate,
+    )
 
     robot_model = instantiate_g1_robot_model(waist_location="lower_and_upper_body")
     map_normalized_hand_actions = os.environ.get(
@@ -775,6 +807,11 @@ def main(config: InferenceConfig):
                 cpp_mode = "PLANNER" if planner else "POSE"
             else:
                 cpp_mode = "OFF"
+            _TRACE.emit(
+                "controller_command",
+                command=action_str,
+                mode=mode_str,
+            )
             print_green(f"Sent ZMQ command: {action_str} control loop ({mode_str} mode)")
             return True
         except Exception as e:
@@ -784,7 +821,9 @@ def main(config: InferenceConfig):
 
     # Async inference state
     cached_action_chunk = None
+    cached_chunk_id = None
     action_chunk_index = 0
+    next_chunk_id = 0
     last_inference_time = 0.0
     accept_inference_started_at = 0.0
     inference_interval = 1.0 / config.rate
@@ -797,7 +836,8 @@ def main(config: InferenceConfig):
     def check_keyboard_input():
         nonlocal pause_loop, cpp_loop_running, cpp_mode
         nonlocal initial_pose_left_hand_closed, initial_pose_right_hand_closed
-        nonlocal cached_action_chunk, action_chunk_index, last_inference_time
+        nonlocal cached_action_chunk, cached_chunk_id
+        nonlocal action_chunk_index, last_inference_time
         nonlocal accept_inference_started_at
         nonlocal zmq_frame_counter, last_sent_motion_token
 
@@ -838,16 +878,20 @@ def main(config: InferenceConfig):
 
             zmq_frame_counter = 0
             cached_action_chunk = None
+            cached_chunk_id = None
             action_chunk_index = 0
+            _TRACE.emit("initial_pose_completed")
             print("Cleared cached action chunk, reset frame counter")
         elif key == "p":
             pause_loop = not pause_loop
             print(f"{'Paused' if pause_loop else 'Resumed'} policy loop")
             if pause_loop:
+                _TRACE.emit("policy_paused")
                 print("Policy loop paused (C++ loop still running - press 'k' to stop)")
             else:
                 _start_ego_video_override()
                 cached_action_chunk = None
+                cached_chunk_id = None
                 action_chunk_index = 0
                 last_inference_time = 0.0
                 accept_inference_started_at = time.monotonic()
@@ -856,6 +900,7 @@ def main(config: InferenceConfig):
                         result_queue.get_nowait()
                     except queue.Empty:
                         break
+                _TRACE.emit("policy_resumed")
                 print("Cleared cached action chunk for a fresh resume observation")
                 print("Policy loop resumed")
         elif key == "k":
@@ -923,8 +968,15 @@ def main(config: InferenceConfig):
 
             # Consume result first so last_inference_time is fresh before trigger check
             try:
-                processed_action, inference_start_time = result_queue.get_nowait()
+                (
+                    processed_action,
+                    inference_start_time,
+                    chunk_id,
+                    duration_ns,
+                    observation_ns,
+                ) = result_queue.get_nowait()
                 if inference_start_time < accept_inference_started_at:
+                    _TRACE.emit("chunk_discarded", chunk_id=chunk_id, reason="pre_resume")
                     print(
                         "Discarded action chunk computed before the latest policy resume",
                         flush=True,
@@ -935,7 +987,16 @@ def main(config: InferenceConfig):
                         inference_delay, config.action_publish_rate, config.action_horizon
                     )
                     cached_action_chunk = processed_action
+                    cached_chunk_id = chunk_id
                     last_inference_time = time.monotonic()
+                    _TRACE.emit(
+                        "chunk_accepted",
+                        chunk_id=chunk_id,
+                        duration_ns=duration_ns,
+                        observation_ns=observation_ns,
+                        action_index=action_chunk_index,
+                        action_horizon=config.action_horizon,
+                    )
                     print_green(
                         f'New action chunk (prompt: "{language_prompt_ref[0]}", '
                         f"latency: {inference_delay:.3f}s)"
@@ -953,7 +1014,9 @@ def main(config: InferenceConfig):
 
             if should_start:
                 try:
-                    inference_queue.put_nowait(None)
+                    inference_queue.put_nowait(next_chunk_id)
+                    _TRACE.emit("inference_queued", chunk_id=next_chunk_id)
+                    next_chunk_id += 1
                 except queue.Full:
                     pass
 
@@ -1035,6 +1098,13 @@ def main(config: InferenceConfig):
                     )
                     zmq_socket.send(zmq_message)
                     last_sent_motion_token = motion_token.copy()
+                    _TRACE.emit(
+                        "action_published",
+                        chunk_id=cached_chunk_id,
+                        action_index=current_idx,
+                        hand_action_index=hand_idx,
+                        frame_index=int(frame_index[0]),
+                    )
                     if zmq_frame_counter % 50 == 0:
                         print_green(
                             f"ZMQ: Sent latent action - "

@@ -130,6 +130,35 @@ For a three-trial smoke campaign, set `GROOT_WBC_TRIALS_PER_SCENARIO=1`. A trial
 
 If the exclusive shell is interrupted, rerun the same command and tag with `GROOT_WBC_RESUME=YES`. The runner verifies that evaluator code has not changed, archives incomplete trial evidence, skips complete terminal trials, records the resume commit, and emits `campaign-complete` only after aggregation. An interrupted cleanup cannot report exit code zero without that marker.
 
+### GR00T-to-WBC real-time trace
+
+Task campaigns enable synchronized real-time tracing by default. The client,
+controller container, and simulator share the Linux monotonic clock, so the
+retained events correlate GR00T inference with the exact 50 Hz action frame
+received by SONIC/WBC and the resulting contact, lift, and object motion.
+
+Each traced trial adds:
+
+- `realtime-trace.json`: latency, action freshness, horizon margin, publish
+  deadlines, transport latency, and frame-continuity metrics;
+- `realtime-trace-events.jsonl`: the normalized merged event stream;
+- `realtime-trace.perfetto.json`: an interactive timeline for Perfetto.
+
+Rebuild a report from retained traced logs with:
+
+```bash
+PYTHONPATH="$PWD" .venv_inference/bin/python \
+  .spark/analyze-realtime-trace.py /path/to/trial \
+  --events-output /path/to/trial/realtime-trace-events.jsonl \
+  --perfetto-output /path/to/trial/realtime-trace.perfetto.json \
+  > /path/to/trial/realtime-trace.json
+```
+
+Load `realtime-trace.perfetto.json` in the Perfetto trace viewer. GR00T
+inference appears as duration spans; action publication, WBC receipt, contact,
+lift, and terminal events appear as aligned markers; object and wrist motion
+appear as counters. Set `GROOT_WBC_REALTIME_TRACE=0` to disable tracing.
+
 ### Retained DGX Spark result
 
 The authoritative `task-campaign-20261002-v6` campaign completed all 90 trials with zero harness-level technical failures and zero task successes. Each scenario's 95% Wilson upper bound is 11.35%. The integration is technically healthy, but the community checkpoint does not satisfy this reconstructed task benchmark's continuous-contact, 45 mm lift, and 0.5-second hold criterion.

@@ -26,8 +26,10 @@ from gear_sonic.utils.mujoco_sim.metric_utils import check_contact, check_height
 from gear_sonic.utils.mujoco_sim.sim_utils import get_subtree_body_names
 from gear_sonic.utils.mujoco_sim.unitree_sdk2py_bridge import ElasticBand, UnitreeSdk2Bridge
 from gear_sonic.utils.mujoco_sim.robot import Robot
+from gear_sonic.utils.inference.realtime_trace import EventTracer
 
 GEAR_SONIC_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+_TRACE = EventTracer("simulator")
 
 
 class DefaultEnv:
@@ -724,6 +726,9 @@ class BottleTaskEnv(DefaultEnv):
         self.max_object_z = self.initial_object_z
         self.contact_observed = False
         self.current_contact = False
+        self._trace_contact_emitted = False
+        self._trace_lift_emitted = False
+        self._trace_terminal_status = None
         self.assisted_grasp_active = False
         self.assisted_grasp_activations = 0
         self._assisted_grasp_relative_position = None
@@ -774,6 +779,9 @@ class BottleTaskEnv(DefaultEnv):
         self.max_object_z = self.initial_object_z
         self.contact_observed = False
         self.current_contact = False
+        self._trace_contact_emitted = False
+        self._trace_lift_emitted = False
+        self._trace_terminal_status = None
         self.assisted_grasp_active = False
         self.assisted_grasp_activations = 0
         self._assisted_grasp_relative_position = None
@@ -784,6 +792,11 @@ class BottleTaskEnv(DefaultEnv):
         self.success = False
         self.wrong_object_lifted = False
         self.reset_applied = True
+        _TRACE.emit(
+            "objects_reset",
+            object_z=self.initial_object_z,
+            sim_time_s=float(self.mj_data.time),
+        )
         self._write_metrics(force=True)
 
     def _apply_prearm_robot_pose(self):
@@ -836,6 +849,11 @@ class BottleTaskEnv(DefaultEnv):
                 self._capture_lower_body_lock()
             self.armed_at = float(self.mj_data.time)
             self.armed_wall_time = time.monotonic()
+            _TRACE.emit(
+                "task_armed",
+                sim_time_s=self.armed_at,
+                initial_object_z=self.initial_object_z,
+            )
             return True
         return False
 
@@ -917,6 +935,12 @@ class BottleTaskEnv(DefaultEnv):
         self.mj_data.eq_active[self._assisted_grasp_equality_id] = 1
         self.assisted_grasp_active = True
         self.assisted_grasp_activations += 1
+        _TRACE.emit(
+            "assisted_grasp_activated",
+            activation=self.assisted_grasp_activations,
+            hand_closure=self._right_hand_closure(),
+            object_z=float(self.mj_data.xpos[self.object_body.id][2]),
+        )
         print(
             "Assisted grasp latched after physical right-hand contact "
             f"(closure={self._right_hand_closure():.3f})",
@@ -995,6 +1019,23 @@ class BottleTaskEnv(DefaultEnv):
         self.current_contact = current_contact
         self.contact_observed = self.contact_observed or current_contact
         lifted = object_z >= self.initial_object_z + self.lift_height
+        if current_contact and not self._trace_contact_emitted:
+            self._trace_contact_emitted = True
+            _TRACE.emit(
+                "contact_started",
+                physical_contact=physical_contact,
+                assisted_grasp_active=self.assisted_grasp_active,
+                hand_closure=hand_closure,
+                object_z=object_z,
+            )
+        if lifted and not self._trace_lift_emitted:
+            self._trace_lift_emitted = True
+            _TRACE.emit(
+                "lift_started",
+                object_z=object_z,
+                lift_m=object_z - self.initial_object_z,
+                contact=current_contact,
+            )
         position = self.mj_data.xpos[self.object_body.id]
         object_in_bounds = (
             position[2] >= 0.2
@@ -1009,6 +1050,22 @@ class BottleTaskEnv(DefaultEnv):
                 self.success = True
         else:
             self.lift_started_wall_time = None
+
+        wrist_position = self.mj_data.xpos[
+            self.mj_model.body("right_wrist_yaw_link").id
+        ]
+        _TRACE.emit(
+            "sim_state",
+            task_time_s=wall_time - self.armed_wall_time,
+            sim_time_s=self.simulator_elapsed,
+            object_z=object_z,
+            wrist_x=float(wrist_position[0]),
+            wrist_y=float(wrist_position[1]),
+            wrist_z=float(wrist_position[2]),
+            hand_closure=hand_closure,
+            contact=current_contact,
+            lifted=lifted,
+        )
 
         if self.scenario == "bottle_apple":
             other = "apple" if self.target == "bottle" else "bottle"
@@ -1106,6 +1163,16 @@ class BottleTaskEnv(DefaultEnv):
             status = "complete"
         else:
             status = "running"
+        if status in {"success", "object_off_table", "simulator_unstable", "complete"}:
+            if status != self._trace_terminal_status:
+                _TRACE.emit(
+                    "task_success" if status == "success" else "task_failed",
+                    status=status,
+                    task_time_s=task_time,
+                    simulator_time_s=simulator_time,
+                    object_z=None if position is None else float(position[2]),
+                )
+                self._trace_terminal_status = status
         payload = {
             "schema_version": 1,
             "scenario": self.scenario,

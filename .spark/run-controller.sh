@@ -32,6 +32,7 @@ exec docker run --rm "${tty_args[@]}" \
   "${network_args[@]}" \
   --env "GROOT_WBC_SIM_INTERFACE=$sim_interface" \
   --env "GROOT_WBC_AUTO_APPROVE=${GROOT_WBC_AUTO_APPROVE:-}" \
+  --env "GROOT_WBC_TRACE_EVENTS=${GROOT_WBC_TRACE_EVENTS:-}" \
   --volume "$repo_root/gear_sonic_deploy:/workspace/gear_sonic_deploy" \
   --workdir /workspace/gear_sonic_deploy \
   --entrypoint /workspace/gear_sonic_deploy/deploy.sh \

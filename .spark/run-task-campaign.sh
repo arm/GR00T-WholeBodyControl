@@ -17,6 +17,7 @@ campaign_scenarios="${GROOT_WBC_CAMPAIGN_SCENARIOS:-all}"
 campaign_seeds="${GROOT_WBC_SEEDS:-}"
 model_revision="${GROOT_WBC_MODEL_REVISION:-5fdb36c78c88b9cc3a2c584fcd8993e9955b2384}"
 resume="${GROOT_WBC_RESUME:-NO}"
+realtime_trace="${GROOT_WBC_REALTIME_TRACE:-1}"
 resuming=false
 protected=(pi05-fp8-production qwen3-vl-judge triton-spark)
 bridge_gateway="$(docker network inspect bridge -f '{{(index .IPAM.Config 0).Gateway}}')"
@@ -43,6 +44,10 @@ if [[ -n "$campaign_seeds" && ! "$campaign_seeds" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
   echo "GROOT_WBC_SEEDS must be a comma-separated list of non-negative integers" >&2
   exit 1
 fi
+if [[ "$realtime_trace" != "0" && "$realtime_trace" != "1" ]]; then
+  echo "GROOT_WBC_REALTIME_TRACE must be 0 or 1" >&2
+  exit 1
+fi
 if [[ -n "$campaign_seeds" ]]; then
   IFS=',' read -r -a campaign_seed_values <<<"$campaign_seeds"
 else
@@ -64,7 +69,9 @@ if [[ -e "$result" ]]; then
   }
   original_commit=$(<"$result/source-commit.txt")
   if ! git -C "$repo" diff --quiet "$original_commit" HEAD -- \
-      gear_sonic/utils/mujoco_sim/base_sim.py .spark/analyze-task-campaign.py; then
+      gear_sonic/utils/mujoco_sim/base_sim.py \
+      gear_sonic/utils/inference/realtime_trace.py \
+      .spark/analyze-realtime-trace.py .spark/analyze-task-campaign.py; then
     echo "Evaluator changed since the campaign began; refusing mixed-code resume." >&2
     exit 1
   fi
@@ -123,8 +130,9 @@ else
   git rev-parse HEAD >"$result/source-commit.txt"
   printf '%s\n' "$model_revision" >"$result/model-revision.txt"
   sha256sum "$model"/model-*.safetensors >"$result/model-sha256.txt"
-  printf 'trials_per_scenario=%s\ntask_duration_s=%s\ncampaign_scenarios=%s\ncampaign_seeds=%s\n' \
+  printf 'trials_per_scenario=%s\ntask_duration_s=%s\ncampaign_scenarios=%s\ncampaign_seeds=%s\nrealtime_trace=%s\n' \
     "$trials_per_scenario" "$task_duration" "$campaign_scenarios" "$campaign_seeds" \
+    "$realtime_trace" \
     >"$result/campaign-config.txt"
 fi
 docker ps --format '{{.Names}}|{{.ID}}|{{.Status}}' >"$result/containers-before.txt"
@@ -214,7 +222,7 @@ run_trial() {
   task_arm_file="$trial_result/task-armed"
   task_reset_file="$trial_result/reset-objects"
   mkdir -p "$trial_result"
-  printf 'scenario=%s\ntarget=%s\nprompt=%s\nseed=%s\nduration_s=%s\nlift_height_m=%s\nhold_time_s=%s\nbottle_position=%s\nrobot_body_q=%s\nlock_lower_body=%s\nwaist_yaw_bounds_rad=%s\nassisted_grasp=%s\npause_on_lift=%s\npolicy_inference_seed=%s\nsonic_checkpoint=%s\nsonic_obs_config=%s\nego_video_override=%s\nobservation_trace_override=%s\naction_trace_override=%s\nhand_action_lead_frames=%s\n' \
+  printf 'scenario=%s\ntarget=%s\nprompt=%s\nseed=%s\nduration_s=%s\nlift_height_m=%s\nhold_time_s=%s\nbottle_position=%s\nrobot_body_q=%s\nlock_lower_body=%s\nwaist_yaw_bounds_rad=%s\nassisted_grasp=%s\npause_on_lift=%s\npolicy_inference_seed=%s\nsonic_checkpoint=%s\nsonic_obs_config=%s\nego_video_override=%s\nobservation_trace_override=%s\naction_trace_override=%s\nhand_action_lead_frames=%s\nrealtime_trace=%s\n' \
     "$scenario" "$target" "$prompt" "$seed" "$task_duration" \
     "${GROOT_WBC_TASK_LIFT_HEIGHT_M:-0.045}" \
     "${GROOT_WBC_TASK_HOLD_TIME_S:-0.5}" \
@@ -231,6 +239,7 @@ run_trial() {
     "${GROOT_WBC_OBSERVATION_TRACE_OVERRIDE:-none}" \
     "${GROOT_WBC_ACTION_TRACE_OVERRIDE:-none}" \
     "${GROOT_WBC_HAND_ACTION_LEAD_FRAMES:-0}" \
+    "$realtime_trace" \
     >"$trial_result/evaluation-config.txt"
 
   GROOT_WBC_TASK_SCENARIO="$scenario" \
@@ -251,6 +260,7 @@ run_trial() {
   GROOT_WBC_ASSISTED_GRASP_CLOSE_THRESHOLD="${GROOT_WBC_ASSISTED_GRASP_CLOSE_THRESHOLD:-0.5}" \
   GROOT_WBC_ASSISTED_GRASP_RELEASE_THRESHOLD="${GROOT_WBC_ASSISTED_GRASP_RELEASE_THRESHOLD:-0.15}" \
   GROOT_WBC_ASSISTED_GRASP_CONTACT_GRACE_S="${GROOT_WBC_ASSISTED_GRASP_CONTACT_GRACE_S:-0.75}" \
+  GROOT_WBC_TRACE_EVENTS="$realtime_trace" \
   PYTHONUNBUFFERED=1 setsid .spark/run-sim.sh --env-name pnp_bottle \
     >"$trial_result/sim.log" 2>&1 &
   sim_pid=$!
@@ -263,6 +273,7 @@ run_trial() {
 
   GROOT_WBC_AUTO_APPROVE=YES \
   GROOT_WBC_NETWORK_MODE=bridge \
+  GROOT_WBC_TRACE_EVENTS="$realtime_trace" \
   GROOT_WBC_CONTROLLER_CONTAINER_NAME=gr00t-wbc-controller \
     .spark/run-controller.sh \
       --cp "${GROOT_WBC_SONIC_CHECKPOINT:-policy/release/model}" \
@@ -292,6 +303,7 @@ run_trial() {
   GROOT_WBC_OBSERVATION_TRACE_OVERRIDE="${GROOT_WBC_OBSERVATION_TRACE_OVERRIDE:-}" \
   GROOT_WBC_ACTION_TRACE_OVERRIDE="${GROOT_WBC_ACTION_TRACE_OVERRIDE:-}" \
   GROOT_WBC_HAND_ACTION_LEAD_FRAMES="${GROOT_WBC_HAND_ACTION_LEAD_FRAMES:-0}" \
+  GROOT_WBC_TRACE_EVENTS="$realtime_trace" \
   PYTHONUNBUFFERED=1 setsid .spark/run-inference-client.sh \
     --host 127.0.0.1 \
     --port 5550 \
@@ -482,6 +494,13 @@ run_trial() {
 
   "$repo/.venv_inference/bin/python" .spark/analyze-eval.py "$trial_result" \
     >"$trial_result/performance.json"
+  if [[ "$realtime_trace" == "1" ]]; then
+    PYTHONPATH="$repo" "$repo/.venv_inference/bin/python" \
+      .spark/analyze-realtime-trace.py "$trial_result" \
+      --events-output "$trial_result/realtime-trace-events.jsonl" \
+      --perfetto-output "$trial_result/realtime-trace.perfetto.json" \
+      >"$trial_result/realtime-trace.json"
+  fi
   printf 'action_chunks=%s\naction_frame_markers=%s\ncontroller_frames=%s\ntermination_reason=%s\n' \
     "$action_chunks" "$action_frames" "$controller_frames" "$task_status" \
     >"$trial_result/summary.txt"
