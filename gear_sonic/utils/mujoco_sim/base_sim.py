@@ -245,16 +245,40 @@ class DefaultEnv:
         assert len(self.right_hand_index) == self.robot.NUM_HAND_JOINTS
 
         self.body_joint_index = np.array(self.body_joint_index)
-        self.left_hand_index = np.array(self.left_hand_index)
-        self.right_hand_index = np.array(self.right_hand_index)
+
+        # HandCmd uses the Dex3 semantic order from G1SupplementalInfo rather
+        # than MuJoCo's XML joint-tree order.  Keep feedback, PD targets, and
+        # actuator assignment in that same order.
+        hand_joint_order = (
+            "thumb_0_joint",
+            "thumb_1_joint",
+            "thumb_2_joint",
+            "index_0_joint",
+            "index_1_joint",
+            "middle_0_joint",
+            "middle_1_joint",
+        )
+        self.left_hand_index = np.array(
+            [self.mj_model.joint(f"left_hand_{name}").id for name in hand_joint_order]
+        )
+        self.right_hand_index = np.array(
+            [self.mj_model.joint(f"right_hand_{name}").id for name in hand_joint_order]
+        )
 
     def init_renderers(self):
         self.renderers = {}
+        self.renderer_scene_options = {}
         for camera_name, camera_config in self.camera_configs.items():
             renderer = mujoco.Renderer(
                 self.mj_model, height=camera_config["height"], width=camera_config["width"]
             )
             self.renderers[camera_name] = renderer
+            scene_option = mujoco.MjvOption()
+            for geom_group in camera_config.get("hidden_geom_groups", ()):
+                if not 0 <= geom_group < len(scene_option.geomgroup):
+                    raise ValueError(f"Invalid MuJoCo geom group: {geom_group}")
+                scene_option.geomgroup[geom_group] = 0
+            self.renderer_scene_options[camera_name] = scene_option
 
     def compute_body_torques(self) -> np.ndarray:
         # PD control: tau = tau_ff + kp * (q_des - q) + kd * (dq_des - dq)
@@ -482,12 +506,25 @@ class DefaultEnv:
         render_caches = {}
         for camera_name, camera_config in self.camera_configs.items():
             renderer = self.renderers[camera_name]
+            scene_option = self.renderer_scene_options[camera_name]
             if "params" in camera_config:
-                renderer.update_scene(self.mj_data, camera=camera_config["params"])
+                renderer.update_scene(
+                    self.mj_data,
+                    camera=camera_config["params"],
+                    scene_option=scene_option,
+                )
             elif "mjcf_name" in camera_config:
-                renderer.update_scene(self.mj_data, camera=camera_config["mjcf_name"])
+                renderer.update_scene(
+                    self.mj_data,
+                    camera=camera_config["mjcf_name"],
+                    scene_option=scene_option,
+                )
             else:
-                renderer.update_scene(self.mj_data, camera=camera_name)
+                renderer.update_scene(
+                    self.mj_data,
+                    camera=camera_name,
+                    scene_option=scene_option,
+                )
             render_caches[camera_name + "_image"] = renderer.render()
 
         if self.image_publish_process is not None:
@@ -534,6 +571,18 @@ class BottleTaskEnv(DefaultEnv):
     TABLE_X_BOUNDS = (0.10, 0.70)
     TABLE_ABS_Y_BOUND = 0.78
 
+    # The source demonstrations and closed-loop evaluation use twelve fixed
+    # placements on the robot's right half of the table.  Labels run down each
+    # column (C1-C4, C5-C8, C9-C12), from near to far in x.  MuJoCo's camera
+    # right axis is negative world y.
+    SINGLE_BOTTLE_POSITIONS = np.array(
+        [
+            [x, y, 0.875]
+            for y in (-0.07, -0.21, -0.35)
+            for x in (0.21, 0.31, 0.41, 0.51)
+        ]
+    )
+
     RIGHT_HAND_BODIES = [
         "right_hand_thumb_0_link",
         "right_hand_thumb_1_link",
@@ -571,8 +620,46 @@ class BottleTaskEnv(DefaultEnv):
         self.target = os.environ.get("GROOT_WBC_TASK_TARGET", "bottle")
         self.seed = int(os.environ.get("GROOT_WBC_TASK_SEED", "0"))
         self.metrics_path = os.environ.get("GROOT_WBC_TASK_METRICS_PATH")
+        self.metrics_history_path = os.environ.get("GROOT_WBC_TASK_HISTORY_PATH")
         self.arm_file = os.environ.get("GROOT_WBC_TASK_ARM_FILE")
-        self.lock_lower_body = os.environ.get("GROOT_WBC_LOCK_LOWER_BODY", "1") != "0"
+        self.reset_file = os.environ.get("GROOT_WBC_TASK_RESET_FILE")
+        self.reset_applied = self.reset_file is None
+        self.lock_lower_body = os.environ.get("GROOT_WBC_LOCK_LOWER_BODY", "0") != "0"
+        waist_yaw_bounds = os.environ.get("GROOT_WBC_WAIST_YAW_BOUNDS_RAD", "")
+        self.waist_yaw_bounds = None
+        if waist_yaw_bounds:
+            parsed_bounds = np.fromstring(waist_yaw_bounds, sep=",", dtype=float)
+            if (
+                parsed_bounds.shape != (2,)
+                or not np.all(np.isfinite(parsed_bounds))
+                or parsed_bounds[0] >= parsed_bounds[1]
+            ):
+                raise ValueError(
+                    "GROOT_WBC_WAIST_YAW_BOUNDS_RAD must contain finite lower,upper bounds"
+                )
+            self.waist_yaw_bounds = parsed_bounds
+        self.assisted_grasp_enabled = (
+            os.environ.get("GROOT_WBC_ASSISTED_GRASP", "0") != "0"
+        )
+        self.assisted_grasp_close_threshold = float(
+            os.environ.get("GROOT_WBC_ASSISTED_GRASP_CLOSE_THRESHOLD", "0.5")
+        )
+        self.assisted_grasp_release_threshold = float(
+            os.environ.get("GROOT_WBC_ASSISTED_GRASP_RELEASE_THRESHOLD", "0.15")
+        )
+        self.assisted_grasp_contact_grace = float(
+            os.environ.get("GROOT_WBC_ASSISTED_GRASP_CONTACT_GRACE_S", "0.75")
+        )
+        if not (
+            0.0
+            <= self.assisted_grasp_release_threshold
+            < self.assisted_grasp_close_threshold
+        ):
+            raise ValueError(
+                "Assisted-grasp thresholds must satisfy 0 <= release < close"
+            )
+        if self.assisted_grasp_contact_grace < 0.0:
+            raise ValueError("Assisted-grasp contact grace must be non-negative")
         self.task_duration = float(os.environ.get("GROOT_WBC_TASK_DURATION_S", "90"))
         self.lift_height = float(os.environ.get("GROOT_WBC_TASK_LIFT_HEIGHT_M", "0.045"))
         self.hold_time = float(os.environ.get("GROOT_WBC_TASK_HOLD_TIME_S", "0.5"))
@@ -596,9 +683,12 @@ class BottleTaskEnv(DefaultEnv):
 
         camera_configs = {
             "ego_view": {
-                "height": 400,
-                "width": 400,
+                "height": 480,
+                "width": 640,
                 "mjcf_name": "egoview",
+                # Robot visual meshes use group 1; collision-only duplicates use
+                # group 0 and must not appear in the policy RGB observation.
+                "hidden_geom_groups": (0,),
             },
         }
         super().__init__(
@@ -610,14 +700,36 @@ class BottleTaskEnv(DefaultEnv):
             enable_image_publish,
         )
 
+        prearm_body_q = os.environ.get("GROOT_WBC_TASK_ROBOT_BODY_Q")
+        self._prearm_body_q = None
+        if prearm_body_q:
+            self._prearm_body_q = np.fromstring(prearm_body_q, sep=",", dtype=float)
+            if self._prearm_body_q.shape != (self.num_body_dof,) or not np.all(
+                np.isfinite(self._prearm_body_q)
+            ):
+                raise ValueError(
+                    "GROOT_WBC_TASK_ROBOT_BODY_Q must contain "
+                    f"{self.num_body_dof} finite comma-separated coordinates"
+                )
+
         self._place_objects()
         self.object_body_name = f"{self.target}_body"
         self.object_geom_name = self.target
         self.object_body = self.mj_model.body(self.object_body_name)
         self.object_geom = self.mj_model.geom(self.object_geom_name)
+        self._assisted_grasp_equality_id = self.mj_model.equality(
+            "assisted_grasp_weld"
+        ).id
         self.initial_object_z = float(self.mj_data.xpos[self.object_body.id][2])
         self.max_object_z = self.initial_object_z
         self.contact_observed = False
+        self.current_contact = False
+        self.assisted_grasp_active = False
+        self.assisted_grasp_activations = 0
+        self._assisted_grasp_relative_position = None
+        self._assisted_grasp_relative_quaternion = None
+        self._last_right_hand_contact_wall_time = None
+        self.mj_data.eq_active[self._assisted_grasp_equality_id] = 0
         self.lift_started_wall_time = None
         self.success = False
         self.wrong_object_lifted = False
@@ -639,15 +751,71 @@ class BottleTaskEnv(DefaultEnv):
         self.mj_data.qpos[qpos_address : qpos_address + 3] = position
         self.mj_model.qpos0[qpos_address : qpos_address + 3] = position
 
+    def _reset_free_body(self, body_name: str):
+        body_id = self.mj_model.body(body_name).id
+        joint_id = int(self.mj_model.body_jntadr[body_id])
+        qpos_address = int(self.mj_model.jnt_qposadr[joint_id])
+        dof_address = int(self.mj_model.jnt_dofadr[joint_id])
+        self.mj_data.qpos[qpos_address : qpos_address + 7] = self.mj_model.qpos0[
+            qpos_address : qpos_address + 7
+        ]
+        self.mj_data.qvel[dof_address : dof_address + 6] = 0.0
+
+    def _maybe_reset_objects(self):
+        if self.reset_applied or not self.reset_file or not Path(self.reset_file).exists():
+            return
+        self._place_objects()
+        self._reset_free_body("bottle_body")
+        if self.scenario == "bottle_apple":
+            self._reset_free_body("apple_body")
+        self._apply_prearm_robot_pose()
+        mujoco.mj_forward(self.mj_model, self.mj_data)
+        self.initial_object_z = float(self.mj_data.xpos[self.object_body.id][2])
+        self.max_object_z = self.initial_object_z
+        self.contact_observed = False
+        self.current_contact = False
+        self.assisted_grasp_active = False
+        self.assisted_grasp_activations = 0
+        self._assisted_grasp_relative_position = None
+        self._assisted_grasp_relative_quaternion = None
+        self._last_right_hand_contact_wall_time = None
+        self.mj_data.eq_active[self._assisted_grasp_equality_id] = 0
+        self.lift_started_wall_time = None
+        self.success = False
+        self.wrong_object_lifted = False
+        self.reset_applied = True
+        self._write_metrics(force=True)
+
+    def _apply_prearm_robot_pose(self):
+        """Hold the simulator at the demonstration start state until arming."""
+        if self._prearm_body_q is None:
+            return
+        body_qpos = self.body_joint_index + self.qpos_offset - 1
+        body_qvel = self.body_joint_index + self.qvel_offset - 1
+        self.mj_data.qpos[body_qpos] = self._prearm_body_q
+        self.mj_data.qvel[body_qvel] = 0.0
+        for hand_indices in (self.left_hand_index, self.right_hand_index):
+            hand_qpos = hand_indices + self.qpos_offset - 1
+            hand_qvel = hand_indices + self.qvel_offset - 1
+            self.mj_data.qpos[hand_qpos] = 0.0
+            self.mj_data.qvel[hand_qvel] = 0.0
+        mujoco.mj_forward(self.mj_model, self.mj_data)
+
     def _place_objects(self):
         rng = np.random.default_rng(self.seed)
         if self.scenario == "single_bottle":
-            if self.seed == 0:
-                bottle_pos = np.array([0.4, 0.0, 0.875])
+            position_override = os.environ.get("GROOT_WBC_TASK_BOTTLE_POSITION")
+            if position_override:
+                bottle_pos = np.fromstring(position_override, sep=",", dtype=float)
+                if bottle_pos.shape != (3,) or not np.all(np.isfinite(bottle_pos)):
+                    raise ValueError(
+                        "GROOT_WBC_TASK_BOTTLE_POSITION must contain three finite "
+                        "comma-separated coordinates"
+                    )
             else:
-                bottle_pos = np.array(
-                    [0.4 + rng.uniform(-0.04, 0.04), rng.uniform(-0.10, 0.10), 0.875]
-                )
+                bottle_pos = self.SINGLE_BOTTLE_POSITIONS[
+                    self.seed % len(self.SINGLE_BOTTLE_POSITIONS)
+                ].copy()
             self._set_free_body_position("bottle_body", bottle_pos)
         else:
             jitter_x = 0.0 if self.seed == 0 else rng.uniform(-0.035, 0.035)
@@ -689,11 +857,77 @@ class BottleTaskEnv(DefaultEnv):
             dof_address = int(self.mj_model.jnt_dofadr[joint_id])
             self.mj_data.qpos[qpos_address] = position
             self.mj_data.qvel[dof_address] = 0.0
+        if self.waist_yaw_bounds is not None:
+            waist_yaw = self.mj_model.joint("waist_yaw_joint")
+            qpos_address = int(self.mj_model.jnt_qposadr[waist_yaw.id])
+            dof_address = int(self.mj_model.jnt_dofadr[waist_yaw.id])
+            position = float(self.mj_data.qpos[qpos_address])
+            constrained = float(
+                np.clip(
+                    position,
+                    self.waist_yaw_bounds[0],
+                    self.waist_yaw_bounds[1],
+                )
+            )
+            self.mj_data.qpos[qpos_address] = constrained
+            if constrained != position:
+                self.mj_data.qvel[dof_address] = 0.0
         mujoco.mj_forward(self.mj_model, self.mj_data)
+
+    def _right_hand_closure(self) -> float:
+        joint_names = (
+            "right_hand_index_0_joint",
+            "right_hand_index_1_joint",
+            "right_hand_middle_0_joint",
+            "right_hand_middle_1_joint",
+        )
+        positions = [
+            float(
+                self.mj_data.qpos[
+                    self.mj_model.jnt_qposadr[self.mj_model.joint(name).id]
+                ]
+            )
+            for name in joint_names
+        ]
+        return float(np.mean(positions))
+
+    def _activate_assisted_grasp(self):
+        """Capture the current object pose relative to the live wrist pose."""
+        anchor = self.mj_model.body("right_wrist_yaw_link")
+        anchor_position = self.mj_data.xpos[anchor.id].copy()
+        anchor_rotation = self.mj_data.xmat[anchor.id].reshape(3, 3).copy()
+        anchor_quaternion = self.mj_data.xquat[anchor.id].copy()
+        object_position = self.mj_data.xpos[self.object_body.id].copy()
+        object_quaternion = self.mj_data.xquat[self.object_body.id].copy()
+
+        self._assisted_grasp_relative_position = anchor_rotation.T @ (
+            object_position - anchor_position
+        )
+        inverse_anchor_quaternion = np.empty(4, dtype=float)
+        relative_quaternion = np.empty(4, dtype=float)
+        mujoco.mju_negQuat(inverse_anchor_quaternion, anchor_quaternion)
+        mujoco.mju_mulQuat(
+            relative_quaternion, inverse_anchor_quaternion, object_quaternion
+        )
+        self._assisted_grasp_relative_quaternion = relative_quaternion
+        equality_data = self.mj_model.eq_data[self._assisted_grasp_equality_id]
+        equality_data[:3] = 0.0
+        equality_data[3:6] = self._assisted_grasp_relative_position
+        equality_data[6:10] = self._assisted_grasp_relative_quaternion
+        self.mj_data.eq_active[self._assisted_grasp_equality_id] = 1
+        self.assisted_grasp_active = True
+        self.assisted_grasp_activations += 1
+        print(
+            "Assisted grasp latched after physical right-hand contact "
+            f"(closure={self._right_hand_closure():.3f})",
+            flush=True,
+        )
 
     def sim_step(self):
         previous_sim_time = float(self.mj_data.time)
         super().sim_step()
+        if self.reset_applied and self.armed_at is None:
+            self._apply_prearm_robot_pose()
         current_sim_time = float(self.mj_data.time)
         state_is_finite = all(
             np.all(np.isfinite(values))
@@ -713,6 +947,7 @@ class BottleTaskEnv(DefaultEnv):
         return float(self.mj_data.xpos[body_id][2]) >= initial_z + self.lift_height
 
     def update_reward(self):
+        self._maybe_reset_objects()
         if not self._is_armed():
             self._write_metrics()
             return
@@ -724,12 +959,40 @@ class BottleTaskEnv(DefaultEnv):
         wall_time = time.monotonic()
         object_z = float(self.mj_data.xpos[self.object_body.id][2])
         self.max_object_z = max(self.max_object_z, object_z)
-        current_contact = check_contact(
+        physical_contact = check_contact(
             self.mj_model,
             self.mj_data,
             self.RIGHT_HAND_BODIES,
             self.object_body_name,
         )
+        hand_closure = self._right_hand_closure()
+        if physical_contact:
+            self._last_right_hand_contact_wall_time = wall_time
+        recent_contact = bool(
+            self._last_right_hand_contact_wall_time is not None
+            and wall_time - self._last_right_hand_contact_wall_time
+            <= self.assisted_grasp_contact_grace
+        )
+        if (
+            self.assisted_grasp_enabled
+            and not self.assisted_grasp_active
+            and recent_contact
+            and hand_closure >= self.assisted_grasp_close_threshold
+        ):
+            self._activate_assisted_grasp()
+        elif (
+            self.assisted_grasp_active
+            and hand_closure <= self.assisted_grasp_release_threshold
+        ):
+            self.mj_data.eq_active[self._assisted_grasp_equality_id] = 0
+            self.assisted_grasp_active = False
+            print(
+                "Assisted grasp released after hand opening "
+                f"(closure={hand_closure:.3f})",
+                flush=True,
+            )
+        current_contact = physical_contact or self.assisted_grasp_active
+        self.current_contact = current_contact
         self.contact_observed = self.contact_observed or current_contact
         lifted = object_z >= self.initial_object_z + self.lift_height
         position = self.mj_data.xpos[self.object_body.id]
@@ -787,6 +1050,36 @@ class BottleTaskEnv(DefaultEnv):
             if hasattr(self, "object_body")
             else None
         )
+        object_quaternion = (
+            self.mj_data.xquat[self.object_body.id].tolist()
+            if hasattr(self, "object_body")
+            else None
+        )
+        right_hand_positions = {
+            name: self.mj_data.xpos[self.mj_model.body(name).id].tolist()
+            for name in (
+                "right_wrist_yaw_link",
+                "right_hand_thumb_2_link",
+                "right_hand_middle_1_link",
+                "right_hand_index_1_link",
+            )
+        }
+        right_hand_joint_positions = {
+            name: float(
+                self.mj_data.qpos[
+                    self.mj_model.jnt_qposadr[self.mj_model.joint(name).id]
+                ]
+            )
+            for name in (
+                "right_hand_thumb_0_joint",
+                "right_hand_thumb_1_joint",
+                "right_hand_thumb_2_joint",
+                "right_hand_middle_0_joint",
+                "right_hand_middle_1_joint",
+                "right_hand_index_0_joint",
+                "right_hand_index_1_joint",
+            )
+        }
         object_off_table = bool(
             task_time is not None
             and position is not None
@@ -823,9 +1116,13 @@ class BottleTaskEnv(DefaultEnv):
             "simulator_time_s": simulator_time,
             "task_duration_s": self.task_duration,
             "object_position": position,
+            "object_quaternion": object_quaternion,
+            "right_hand_positions": right_hand_positions,
+            "right_hand_joint_positions": right_hand_joint_positions,
             "initial_object_z": getattr(self, "initial_object_z", None),
             "max_object_z": getattr(self, "max_object_z", None),
             "contact_observed": getattr(self, "contact_observed", False),
+            "right_hand_contact": getattr(self, "current_contact", False),
             "lift_observed": bool(
                 hasattr(self, "max_object_z")
                 and self.max_object_z >= self.initial_object_z + self.lift_height
@@ -836,6 +1133,23 @@ class BottleTaskEnv(DefaultEnv):
             "robot_falls": getattr(self, "robot_falls", 0),
             "simulator_instabilities": self.simulator_instabilities,
             "lower_body_locked": self.lock_lower_body,
+            "waist_yaw_bounds_rad": (
+                None
+                if self.waist_yaw_bounds is None
+                else self.waist_yaw_bounds.tolist()
+            ),
+            "waist_yaw_position_rad": float(
+                self.mj_data.qpos[
+                    self.mj_model.jnt_qposadr[
+                        self.mj_model.joint("waist_yaw_joint").id
+                    ]
+                ]
+            ),
+            "assisted_grasp_enabled": self.assisted_grasp_enabled,
+            "assisted_grasp_active": self.assisted_grasp_active,
+            "assisted_grasp_activations": self.assisted_grasp_activations,
+            "assisted_grasp_contact_grace_s": self.assisted_grasp_contact_grace,
+            "reset_applied": self.reset_applied,
             "criteria": {
                 "lift_height_m": self.lift_height,
                 "hold_time_s": self.hold_time,
@@ -847,6 +1161,11 @@ class BottleTaskEnv(DefaultEnv):
         temporary = path.with_suffix(path.suffix + ".tmp")
         temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
         os.replace(temporary, path)
+        if self.metrics_history_path:
+            history_path = Path(self.metrics_history_path)
+            history_path.parent.mkdir(parents=True, exist_ok=True)
+            with history_path.open("a") as history:
+                history.write(json.dumps(payload, sort_keys=True) + "\n")
 
     def get_privileged_obs(self):
         return {

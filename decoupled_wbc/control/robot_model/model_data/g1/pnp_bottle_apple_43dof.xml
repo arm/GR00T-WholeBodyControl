@@ -53,9 +53,12 @@
         friction="0.95 0.3 0.1" />
     </body>
 
-    <camera name="egoview" pos="0.078 0 1.308"
-      xyaxes="0.000 -1.000 0.000 0.767 0.001 0.641" fovy="90" />
   </worldbody>
+
+  <equality>
+    <weld name="pelvis_world_weld" body1="pelvis" solref="0.02 1"
+      solimp="0.9 0.95 0.001" />
+  </equality>
 
   <default>
     <geom friction="1.0" />

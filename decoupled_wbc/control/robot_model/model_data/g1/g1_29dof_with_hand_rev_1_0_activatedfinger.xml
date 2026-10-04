@@ -221,6 +221,12 @@
           <geom type="mesh" contype="0" conaffinity="0" group="1" density="0" rgba="0.7 0.7 0.7 1"
             mesh="waist_roll_link" />
           <body name="torso_link">
+            <!-- Stock RealSense mounting plane on the G1 head.  This local
+                 transform reproduces the registered evaluation start view
+                 while keeping the camera outside the moving head mesh. -->
+            <camera name="egoview" pos="0.07555294 0.02579919 0.49719054"
+              quat="0.65290235 0.26697410 -0.28945008 -0.64704096"
+              fovy="43" />
             <inertial pos="0.00203158 0.000339683 0.184568"
               quat="0.999803 -6.03319e-05 0.0198256 0.00131986" mass="7.818"
               diaginertia="0.121847 0.109825 0.0273735" />
@@ -628,14 +634,14 @@
       joint="right_hand_thumb_1_joint" />
       <motor name="right_hand_thumb_2_joint"
       joint="right_hand_thumb_2_joint" />
-      <motor name="right_hand_index_0_joint"
-      joint="right_hand_index_0_joint" />
-      <motor name="right_hand_index_1_joint"
-      joint="right_hand_index_1_joint" />
       <motor name="right_hand_middle_0_joint"
       joint="right_hand_middle_0_joint" />
       <motor name="right_hand_middle_1_joint"
-      joint="right_hand_middle_1_joint" /> --> </actuator>
+      joint="right_hand_middle_1_joint" />
+      <motor name="right_hand_index_0_joint"
+      joint="right_hand_index_0_joint" />
+      <motor name="right_hand_index_1_joint"
+      joint="right_hand_index_1_joint" /> --> </actuator>
 
   <sensor>
     <gyro name="imu-torso-angular-velocity" site="imu_in_torso" noise="5e-4" cutoff="34.9" />
@@ -666,4 +672,3 @@
       <geom name="floor" size="0 0 0.05" type="plane" material="groundplane"/>
     </worldbody> -->
 </mujoco>
-

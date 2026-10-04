@@ -16,32 +16,93 @@
       <texture type="2d" name="groundplane" builtin="checker" mark="edge" rgb1="0.2 0.3 0.4"
         rgb2="0.1 0.2 0.3"
         markrgb="0.8 0.8 0.8" width="300" height="300" />
-      <texture type="2d" name="table" builtin="flat" rgb1="0.7 0.6 0.5" width="512" height="512" />
+      <texture type="2d" name="table" file="training_table_texture_calibrated.png" />
+      <texture type="2d" name="bottle_sprite" file="bottle_sprite_v1.png" />
+      <mesh name="bottle_sprite_mesh" file="bottle_sprite_v1.obj" />
       <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="5 5"
         reflectance="0.2" />
-      <material name="table" texture="table" texuniform="true" reflectance="0.1" />
+      <material name="table" texture="table" texuniform="true" texrepeat="1 1"
+        reflectance="0.05" />
       <texture type="2d" name="cube" builtin="flat" rgb1="0.3 0.7 0.8" width="512" height="512" />
       <material name="cube" texture="cube" texuniform="true" reflectance="0.1" />
+      <material name="water_bottle_body" rgba="0.38 0.73 0.93 0.70"
+        specular="0.08" shininess="0.08" />
+      <material name="water_bottle_ridge" rgba="0.50 0.83 1 0.80"
+        specular="0.08" shininess="0.08" />
+      <material name="water_bottle_label" rgba="0.05 0.56 0.92 1"
+        specular="0.08" shininess="0.08" />
+      <material name="water_bottle_cap" rgba="0.05 0.14 0.21 1"
+        specular="0.08" shininess="0.08" />
+      <material name="water_bottle_cap_mark" rgba="0.72 1 1 1"
+        specular="0.05" shininess="0.05" />
+      <material name="water_bottle_sprite" texture="bottle_sprite"
+        texuniform="false" specular="0" shininess="0" />
     </asset>
   
     <worldbody>
       <light pos="0 0 1.5" dir="0 0 -1" directional="true" />
-      <geom name="floor" size="0 0 0.05" type="plane" material="groundplane" />
+      <geom name="floor" size="0 0 0.05" type="plane" material="groundplane" group="2" />
       <!-- Site -->
       <site name="com_marker" pos="0.1 0 0" size="0.05" rgba="1 0 0 1" type="sphere" />
   
       <body name="table_body" pos="0.4 0 0.4">
-        <geom name="table" pos="0 0 0" size="0.237 0.717 0.4" type="box" material="table"/>
+        <!-- Keep the upstream physical support footprint while allowing the
+             separately non-colliding visual table to match the camera view. -->
+        <geom name="table_collision" pos="0 0 0" size="0.237 0.717 0.4" type="box"
+          rgba="0 0 0 0" group="0" />
+        <geom name="table" pos="0 0 0" size="0.9 0.717 0.4" type="box"
+          material="table" contype="0" conaffinity="0" density="0" group="2" />
       </body>
       <body name="bottle_body" pos="0.4 0 0.875">
         <joint type="free" damping="0.0005" name="cube_joint" />
-        <geom name="bottle" size="0.03 0.075" type="cylinder" material="cube" solimp="0.998 0.998 0.001"
-          solref="0.001 2" density="100" friction="0.95 0.3 0.1" />
+        <!-- Preserve the upstream benchmark mass independently of the
+             calibrated non-colliding bottle visuals. -->
+        <geom name="bottle" size="0.03 0.075" type="cylinder" rgba="0 0 0 0"
+          solimp="0.998 0.998 0.001" solref="0.001 2" density="100"
+          friction="0.95 0.3 0.1" />
+        <geom name="bottle_body_visual" pos="0 0 -0.01" size="0.038535 0.065"
+          type="cylinder" material="water_bottle_body" contype="0" conaffinity="0"
+          density="0" group="0" />
+        <geom name="bottle_lower_ridge_visual" pos="0 0 -0.052" size="0.039636 0.004"
+          type="cylinder" material="water_bottle_ridge" contype="0" conaffinity="0"
+          density="0" group="0" />
+        <geom name="bottle_label_visual" pos="0 0 -0.006" size="0.039636 0.021"
+          type="cylinder" material="water_bottle_label" contype="0" conaffinity="0"
+          density="0" group="0" />
+        <geom name="bottle_upper_ridge_visual" pos="0 0 0.035" size="0.039636 0.004"
+          type="cylinder" material="water_bottle_ridge" contype="0" conaffinity="0"
+          density="0" group="0" />
+        <geom name="bottle_shoulder_visual" pos="0 0 0.064" size="0.034131 0.012"
+          type="cylinder" material="water_bottle_body" contype="0" conaffinity="0"
+          density="0" group="0" />
+        <geom name="bottle_neck_visual" pos="0 0 0.084" size="0.023121 0.010"
+          type="cylinder" material="water_bottle_body" contype="0" conaffinity="0"
+          density="0" group="0" />
+        <geom name="bottle_cap_visual" pos="0 0 0.104" size="0.025323 0.011"
+          type="cylinder" material="water_bottle_cap" contype="0" conaffinity="0"
+          density="0" group="0" />
+        <geom name="bottle_cap_mark_visual" pos="-0.003 0.004 0.1155"
+          size="0.004 0.004 0.001" type="ellipsoid"
+          material="water_bottle_cap_mark" contype="0" conaffinity="0"
+          density="0" group="0" />
+        <geom name="bottle_sprite_visual" pos="0 0 0.0205"
+          quat="-0.65943834 -0.21218829 0.22090443 0.68652635"
+          type="mesh" mesh="bottle_sprite_mesh"
+          material="water_bottle_sprite" contype="0" conaffinity="0"
+          density="0" group="2" />
       </body>
 
-      <camera name="egoview" pos="0.078 0 1.308" xyaxes="0.000 -1.000 0.000 0.767 0.001 0.641" fovy="90"/>
-
     </worldbody>
+
+    <!-- The published evaluation locks the lower body; a solver-level pelvis
+         weld is stable under arm/table contact. -->
+    <equality>
+      <weld name="pelvis_world_weld" body1="pelvis" solref="0.02 1"
+        solimp="0.9 0.95 0.001" />
+      <weld name="assisted_grasp_weld" body1="right_wrist_yaw_link"
+        body2="bottle_body" active="false" relpose="0 0 0 1 0 0 0"
+        solref="0.01 1" solimp="0.95 0.99 0.001" torquescale="0.05" />
+    </equality>
   
     <default>
       <geom friction="1.0" />

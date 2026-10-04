@@ -257,8 +257,52 @@ if [[ "$action_ready" != true ]]; then
   exit 1
 fi
 
+controller_lines_before_init=$(wc -l <"$result/controller.log")
 "$repo/.venv_inference/bin/python" .spark/send-keyboard-command.py i
-sleep 2
+pose_mode_ready=false
+for _ in $(seq 1 20); do
+  if ! kill -0 "$client_pid" 2>/dev/null; then
+    tail -120 "$result/client.log" >&2 || true
+    exit 1
+  fi
+  if tail -n "+$((controller_lines_before_init + 1))" "$result/controller.log" \
+      | grep -q 'ZMQ STREAMING MODE: ENABLED'; then
+    pose_mode_ready=true
+    break
+  fi
+  sleep 1
+done
+if [[ "$pose_mode_ready" != true ]]; then
+  echo "SONIC did not enter streamed pose mode" >&2
+  tail -120 "$result/controller.log" >&2 || true
+  exit 1
+fi
+# The planner-to-pose transition clears any token already queued. Resend the
+# initial pose after streamed mode is active so the controller can consume it.
+"$repo/.venv_inference/bin/python" .spark/send-keyboard-command.py i
+initial_motion_complete=false
+for _ in $(seq 1 20); do
+  if ! kill -0 "$client_pid" 2>/dev/null; then
+    tail -120 "$result/client.log" >&2 || true
+    exit 1
+  fi
+  if ! docker inspect -f '{{.State.Running}}' gr00t-wbc-controller 2>/dev/null | grep -qx true; then
+    tail -120 "$result/controller.log" >&2 || true
+    exit 1
+  fi
+  if tail -n "+$((controller_lines_before_init + 1))" "$result/controller.log" \
+      | grep -q 'Temporary motion completed.'; then
+    initial_motion_complete=true
+    break
+  fi
+  sleep 1
+done
+if [[ "$initial_motion_complete" != true ]]; then
+  echo "SONIC did not complete the initial-pose transition" >&2
+  tail -120 "$result/controller.log" >&2 || true
+  exit 1
+fi
+sleep 1
 "$repo/.venv_inference/bin/python" .spark/send-keyboard-command.py p
 if [[ "$env_name" == "pnp_bottle" ]]; then
   install -m 0644 /dev/null "$task_arm_file"

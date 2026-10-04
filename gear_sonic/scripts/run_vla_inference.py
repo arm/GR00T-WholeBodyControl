@@ -24,10 +24,12 @@ Keyboard commands (received via ZMQ from the standalone keyboard publisher):
 """
 
 from dataclasses import dataclass
+import os
 import queue
 import threading
 import time
 
+import cv2
 import numpy as np
 import tyro
 import zmq
@@ -55,6 +57,201 @@ from gear_sonic.utils.teleop.zmq.zmq_planner_sender import (
     build_command_message,
     pack_pose_message,
 )
+
+
+_EGO_VIDEO_CAPTURE = None
+_EGO_VIDEO_FPS = 0.0
+_EGO_VIDEO_FRAME_COUNT = 0
+_EGO_VIDEO_START_TIME = None
+_OBSERVATION_TRACE = None
+_OBSERVATION_TRACE_PATH = None
+_ACTION_TRACE = None
+_ACTION_TRACE_PATH = None
+
+
+def _start_ego_video_override() -> None:
+    """Restart the optional time-aligned demonstration observation oracle."""
+    global _EGO_VIDEO_START_TIME
+    if os.environ.get("GROOT_WBC_EGO_VIDEO_OVERRIDE") or os.environ.get(
+        "GROOT_WBC_OBSERVATION_TRACE_OVERRIDE"
+    ) or os.environ.get(
+        "GROOT_WBC_ACTION_TRACE_OVERRIDE"
+    ):
+        _EGO_VIDEO_START_TIME = time.monotonic()
+        print_green("Restarted time-aligned demonstration observation override")
+
+
+def _override_ego_view(live_image: np.ndarray) -> np.ndarray:
+    """Return the time-aligned demonstration frame when explicitly requested."""
+    global _EGO_VIDEO_CAPTURE, _EGO_VIDEO_FPS, _EGO_VIDEO_FRAME_COUNT
+
+    path = os.environ.get("GROOT_WBC_EGO_VIDEO_OVERRIDE")
+    if not path:
+        return live_image
+
+    if _EGO_VIDEO_CAPTURE is None:
+        capture = cv2.VideoCapture(path)
+        if not capture.isOpened():
+            raise RuntimeError(f"Could not open ego-view video override: {path}")
+        _EGO_VIDEO_CAPTURE = capture
+        _EGO_VIDEO_FPS = float(capture.get(cv2.CAP_PROP_FPS))
+        _EGO_VIDEO_FRAME_COUNT = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+        print_green(
+            "Using ego-view demonstration video override: "
+            f"{path} ({_EGO_VIDEO_FRAME_COUNT} frames at {_EGO_VIDEO_FPS:.2f} Hz)"
+        )
+
+    elapsed = (
+        0.0
+        if _EGO_VIDEO_START_TIME is None
+        else max(0.0, time.monotonic() - _EGO_VIDEO_START_TIME)
+    )
+    frame_index = min(
+        max(_EGO_VIDEO_FRAME_COUNT - 1, 0),
+        int(elapsed * _EGO_VIDEO_FPS),
+    )
+    _EGO_VIDEO_CAPTURE.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+    ok, bgr = _EGO_VIDEO_CAPTURE.read()
+    if not ok:
+        raise RuntimeError(
+            f"Could not read frame {frame_index} from ego-view video override: {path}"
+        )
+    return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+
+
+def _override_policy_proprioception(
+    live_qpos: np.ndarray, live_projected_gravity: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return time-aligned demonstration proprioception when requested."""
+    global _OBSERVATION_TRACE, _OBSERVATION_TRACE_PATH
+
+    path = os.environ.get("GROOT_WBC_OBSERVATION_TRACE_OVERRIDE")
+    if not path:
+        return live_qpos, live_projected_gravity
+
+    if _OBSERVATION_TRACE is None or _OBSERVATION_TRACE_PATH != path:
+        with np.load(path) as trace:
+            required = {"observation_state", "projected_gravity", "timestamp"}
+            missing = required.difference(trace.files)
+            if missing:
+                raise RuntimeError(
+                    f"Observation trace {path} is missing arrays: {sorted(missing)}"
+                )
+            state = np.asarray(trace["observation_state"], dtype=np.float32).copy()
+            gravity = np.asarray(trace["projected_gravity"], dtype=np.float32).copy()
+            timestamp = np.asarray(trace["timestamp"], dtype=np.float64).copy()
+        if state.ndim != 2 or state.shape[1:] != live_qpos.shape:
+            raise RuntimeError(
+                f"Observation trace state shape {state.shape} is incompatible with "
+                f"live q shape {live_qpos.shape}"
+            )
+        if gravity.shape != (state.shape[0], 3):
+            raise RuntimeError(
+                f"Observation trace gravity shape {gravity.shape} is incompatible "
+                f"with {state.shape[0]} state samples"
+            )
+        if timestamp.shape != (state.shape[0],):
+            raise RuntimeError(
+                f"Observation trace timestamp shape {timestamp.shape} is incompatible "
+                f"with {state.shape[0]} state samples"
+            )
+        if state.shape[0] == 0 or np.any(np.diff(timestamp) < 0):
+            raise RuntimeError(
+                f"Observation trace {path} must contain ordered, non-empty samples"
+            )
+        _OBSERVATION_TRACE = (state, gravity, timestamp)
+        _OBSERVATION_TRACE_PATH = path
+        print_green(
+            "Using demonstration proprioception override: "
+            f"{path} ({state.shape[0]} samples, {timestamp[-1]:.3f}s)"
+        )
+
+    state, gravity, timestamp = _OBSERVATION_TRACE
+    elapsed = (
+        0.0
+        if _EGO_VIDEO_START_TIME is None
+        else max(0.0, time.monotonic() - _EGO_VIDEO_START_TIME)
+    )
+    sample_index = int(np.searchsorted(timestamp, elapsed, side="right") - 1)
+    sample_index = min(max(sample_index, 0), state.shape[0] - 1)
+    return state[sample_index].copy(), gravity[sample_index].copy()
+
+
+def _override_runtime_action(
+    live_motion_token: np.ndarray,
+    live_left_hand: np.ndarray,
+    live_right_hand: np.ndarray,
+    hand_lead_frames: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Replay a time-aligned demonstration action through the live runtime."""
+    global _ACTION_TRACE, _ACTION_TRACE_PATH
+
+    path = os.environ.get("GROOT_WBC_ACTION_TRACE_OVERRIDE")
+    if not path:
+        return live_motion_token, live_left_hand, live_right_hand
+
+    if _ACTION_TRACE is None or _ACTION_TRACE_PATH != path:
+        with np.load(path) as trace:
+            required = {"motion_token", "left_hand", "right_hand", "timestamp"}
+            missing = required.difference(trace.files)
+            if missing:
+                raise RuntimeError(
+                    f"Action trace {path} is missing arrays: {sorted(missing)}"
+                )
+            motion = np.asarray(trace["motion_token"], dtype=np.float32).copy()
+            left = np.asarray(trace["left_hand"], dtype=np.float32).copy()
+            right = np.asarray(trace["right_hand"], dtype=np.float32).copy()
+            timestamp = np.asarray(trace["timestamp"], dtype=np.float64).copy()
+        sample_count = motion.shape[0]
+        if motion.ndim != 2 or motion.shape[1:] != live_motion_token.shape:
+            raise RuntimeError(
+                f"Action trace motion shape {motion.shape} is incompatible with "
+                f"live motion shape {live_motion_token.shape}"
+            )
+        if left.shape != (sample_count, *live_left_hand.shape):
+            raise RuntimeError(
+                f"Action trace left-hand shape {left.shape} is incompatible with "
+                f"live hand shape {live_left_hand.shape}"
+            )
+        if right.shape != (sample_count, *live_right_hand.shape):
+            raise RuntimeError(
+                f"Action trace right-hand shape {right.shape} is incompatible with "
+                f"live hand shape {live_right_hand.shape}"
+            )
+        if timestamp.shape != (sample_count,):
+            raise RuntimeError(
+                f"Action trace timestamp shape {timestamp.shape} is incompatible "
+                f"with {sample_count} action samples"
+            )
+        if sample_count == 0 or np.any(np.diff(timestamp) < 0):
+            raise RuntimeError(
+                f"Action trace {path} must contain ordered, non-empty samples"
+            )
+        _ACTION_TRACE = (motion, left, right, timestamp)
+        _ACTION_TRACE_PATH = path
+        print_green(
+            "Using demonstration action override: "
+            f"{path} ({sample_count} samples, {timestamp[-1]:.3f}s)"
+        )
+
+    motion, left, right, timestamp = _ACTION_TRACE
+    elapsed = (
+        0.0
+        if _EGO_VIDEO_START_TIME is None
+        else max(0.0, time.monotonic() - _EGO_VIDEO_START_TIME)
+    )
+    sample_index = int(np.searchsorted(timestamp, elapsed, side="right") - 1)
+    sample_index = min(max(sample_index, 0), motion.shape[0] - 1)
+    hand_elapsed = elapsed + hand_lead_frames / 50.0
+    hand_sample_index = int(
+        np.searchsorted(timestamp, hand_elapsed, side="right") - 1
+    )
+    hand_sample_index = min(max(hand_sample_index, 0), motion.shape[0] - 1)
+    return (
+        motion[sample_index].copy(),
+        left[hand_sample_index].copy(),
+        right[hand_sample_index].copy(),
+    )
 
 
 @dataclass
@@ -233,7 +430,7 @@ def prepare_observation_from_sensors(
             print("[DEBUG] prepare_observation: waiting for state msg..", flush=True)
         return None
 
-    cam_img = camera_msg["images"]["ego_view"]
+    cam_img = _override_ego_view(camera_msg["images"]["ego_view"])
 
     # Copy index finger data to middle finger (hardware coupling)
     state_msg["left_hand_q"][5] = state_msg["left_hand_q"][3]
@@ -244,6 +441,28 @@ def prepare_observation_from_sensors(
         left_hand_actuated_joint_values=state_msg["left_hand_q"],
         right_hand_actuated_joint_values=state_msg["right_hand_q"],
     )
+
+    # Projected gravity for Sonic latent embodiment.  Compute both policy
+    # proprioceptive modalities before building the observation so an explicit
+    # demonstration trace can override them at one synchronized timestamp.
+    assert "base_quat" in state_msg, "base_quat not found in state_msg"
+    base_quat = np.asarray(state_msg["base_quat"], dtype=np.float64)
+    assert base_quat.shape == (4,), "base_quat must have shape (4,)"
+    projected_gravity = compute_projected_gravity(base_quat)
+    qpos, projected_gravity = _override_policy_proprioception(
+        np.asarray(qpos, dtype=np.float32),
+        np.asarray(projected_gravity, dtype=np.float32),
+    )
+    if os.environ.get("GROOT_WBC_LOG_OBSERVATION_Q", "0") == "1":
+        print(
+            "[OBS_Q] "
+            + np.array2string(
+                np.asarray(qpos, dtype=np.float32),
+                separator=",",
+                max_line_width=100000,
+            ),
+            flush=True,
+        )
 
     video = {"ego_view": cam_img[np.newaxis, np.newaxis]}
     if "left_wrist" in camera_msg["images"]:
@@ -263,14 +482,20 @@ def prepare_observation_from_sensors(
 
     observation = prepare_observation_for_eval(robot_model, observation)
 
-    # Projected gravity for Sonic latent embodiment
-    assert "base_quat" in state_msg, "base_quat not found in state_msg"
-    base_quat = np.asarray(state_msg["base_quat"], dtype=np.float64)
-    assert base_quat.shape == (4,), "base_quat must have shape (4,)"
-    projected_gravity = compute_projected_gravity(base_quat)
     observation["state"]["projected_gravity"] = np.asarray(
         projected_gravity, dtype=np.float32
     )[np.newaxis, np.newaxis]
+
+    # The unitree_g1_sonic demonstrations intentionally record both hand-state
+    # modalities as all zeros.  Keep policy proprioception on that training
+    # contract while still publishing physical Dex3 feedback to SONIC.
+    if os.environ.get("GROOT_WBC_ZERO_HAND_STATE", "0") == "1":
+        observation["state"]["left_hand"] = np.zeros_like(
+            observation["state"]["left_hand"]
+        )
+        observation["state"]["right_hand"] = np.zeros_like(
+            observation["state"]["right_hand"]
+        )
 
     return observation
 
@@ -288,6 +513,23 @@ def run_policy_inference_and_process(policy, observation, robot_model):
         action.pop("action.task_progress", None)
 
         motion_key = "motion_token" if "motion_token" in action else "action.motion_token"
+        if os.environ.get("GROOT_WBC_LOG_ACTION_SUMMARY", "0") == "1":
+            right_hand_key = (
+                "right_hand_joints"
+                if "right_hand_joints" in action
+                else "action.right_hand_joints"
+            )
+            motion = np.asarray(action[motion_key], dtype=np.float32)
+            right_hand = np.asarray(action[right_hand_key], dtype=np.float32)
+            print(
+                "[ACTION] "
+                f"motion_min={motion.min():.4f} motion_max={motion.max():.4f} "
+                f"motion_std={motion.std():.4f} "
+                f"right_grip_first={right_hand[..., 0, :5].mean():.4f} "
+                f"right_grip_last={right_hand[..., -1, :5].mean():.4f} "
+                f"right_grip_max={right_hand[..., :5].mean(axis=-1).max():.4f}",
+                flush=True,
+            )
         if np.abs(action[motion_key]).max() > 1.25:
             print(
                 f"[Warning] action['{motion_key}'] max "
@@ -324,12 +566,12 @@ def _inference_worker_loop(
 
             busy_event.set()
             try:
+                inference_start_time = time.monotonic()
                 observation = prepare_obs_fn()
                 if observation is None:
                     print("[DEBUG] Worker thread: Observation is None, skipping", flush=True)
                     continue
 
-                inference_start_time = time.monotonic()
                 processed_action = inference_fn(observation)
 
                 if processed_action is not None:
@@ -362,10 +604,30 @@ def _compute_closed_hand_joints(side: str) -> np.ndarray:
     return solver._get_middle_close_q_desired().astype(np.float32)
 
 
+def _map_normalized_grip_action(action: np.ndarray, closed_pose: np.ndarray) -> np.ndarray:
+    """Map Inspire-style normalized finger closure to Dex3 joint angles."""
+    action = np.asarray(action, dtype=np.float32)
+    if action.shape != (7,):
+        raise ValueError(f"Normalized hand action must have shape (7,), got {action.shape}")
+    grip = float(np.clip(np.mean(action[:5]), 0.0, 1.0))
+    return (grip * closed_pose).astype(np.float32)
+
+
 def main(config: InferenceConfig):
     pause_loop = True
 
     robot_model = instantiate_g1_robot_model(waist_location="lower_and_upper_body")
+    map_normalized_hand_actions = os.environ.get(
+        "GROOT_WBC_NORMALIZED_HAND_ACTIONS", "0"
+    ) == "1"
+    hand_action_lead_frames = int(os.environ.get("GROOT_WBC_HAND_ACTION_LEAD_FRAMES", "0"))
+    if not 0 <= hand_action_lead_frames < config.action_horizon:
+        raise ValueError(
+            "GROOT_WBC_HAND_ACTION_LEAD_FRAMES must be between 0 and "
+            f"{config.action_horizon - 1}"
+        )
+    left_hand_closed_pose = _compute_closed_hand_joints("L")
+    right_hand_closed_pose = _compute_closed_hand_joints("R")
 
     # Isaac-GR00T PolicyClient
     from gr00t.policy.server_client import PolicyClient
@@ -395,6 +657,11 @@ def main(config: InferenceConfig):
         f"ZMQ action socket bound to tcp://{config.action_zmq_host}:{config.action_zmq_port}"
     )
     print_green(f"Using embodiment tag: {config.embodiment_tag}")
+    print_green(
+        "Normalized hand-action mapping: "
+        + ("Inspire grip -> Dex3 joint angles" if map_normalized_hand_actions else "disabled")
+    )
+    print_green(f"Hand-action lead: {hand_action_lead_frames} frames")
 
     keyboard_listener = ZMQKeyboardSubscriber(
         port=config.keyboard_zmq_port, host=config.keyboard_zmq_host
@@ -519,6 +786,7 @@ def main(config: InferenceConfig):
     cached_action_chunk = None
     action_chunk_index = 0
     last_inference_time = 0.0
+    accept_inference_started_at = 0.0
     inference_interval = 1.0 / config.rate
 
     zmq_frame_counter = 0
@@ -530,6 +798,7 @@ def main(config: InferenceConfig):
         nonlocal pause_loop, cpp_loop_running, cpp_mode
         nonlocal initial_pose_left_hand_closed, initial_pose_right_hand_closed
         nonlocal cached_action_chunk, action_chunk_index, last_inference_time
+        nonlocal accept_inference_started_at
         nonlocal zmq_frame_counter, last_sent_motion_token
 
         key = keyboard_listener.read_msg()
@@ -577,6 +846,17 @@ def main(config: InferenceConfig):
             if pause_loop:
                 print("Policy loop paused (C++ loop still running - press 'k' to stop)")
             else:
+                _start_ego_video_override()
+                cached_action_chunk = None
+                action_chunk_index = 0
+                last_inference_time = 0.0
+                accept_inference_started_at = time.monotonic()
+                while True:
+                    try:
+                        result_queue.get_nowait()
+                    except queue.Empty:
+                        break
+                print("Cleared cached action chunk for a fresh resume observation")
                 print("Policy loop resumed")
         elif key == "k":
             if cpp_loop_running:
@@ -644,16 +924,22 @@ def main(config: InferenceConfig):
             # Consume result first so last_inference_time is fresh before trigger check
             try:
                 processed_action, inference_start_time = result_queue.get_nowait()
-                inference_delay = time.monotonic() - inference_start_time
-                action_chunk_index = calculate_latency_compensated_index(
-                    inference_delay, config.action_publish_rate, config.action_horizon
-                )
-                cached_action_chunk = processed_action
-                last_inference_time = time.monotonic()
-                print_green(
-                    f'New action chunk (prompt: "{language_prompt_ref[0]}", '
-                    f"latency: {inference_delay:.3f}s)"
-                )
+                if inference_start_time < accept_inference_started_at:
+                    print(
+                        "Discarded action chunk computed before the latest policy resume",
+                        flush=True,
+                    )
+                else:
+                    inference_delay = time.monotonic() - inference_start_time
+                    action_chunk_index = calculate_latency_compensated_index(
+                        inference_delay, config.action_publish_rate, config.action_horizon
+                    )
+                    cached_action_chunk = processed_action
+                    last_inference_time = time.monotonic()
+                    print_green(
+                        f'New action chunk (prompt: "{language_prompt_ref[0]}", '
+                        f"latency: {inference_delay:.3f}s)"
+                    )
             except queue.Empty:
                 pass
 
@@ -712,13 +998,31 @@ def main(config: InferenceConfig):
 
                     horizon = motion_token.shape[0] if motion_token.ndim == 2 else 1
                     current_idx = min(action_chunk_index, horizon - 1)
+                    hand_idx = min(current_idx + hand_action_lead_frames, horizon - 1)
 
                     if motion_token.ndim == 2:
                         motion_token = motion_token[current_idx]
                     if left_hand_joints.ndim == 2:
-                        left_hand_joints = left_hand_joints[current_idx]
+                        left_hand_joints = left_hand_joints[hand_idx]
                     if right_hand_joints.ndim == 2:
-                        right_hand_joints = right_hand_joints[current_idx]
+                        right_hand_joints = right_hand_joints[hand_idx]
+
+                    motion_token, left_hand_joints, right_hand_joints = (
+                        _override_runtime_action(
+                            motion_token,
+                            left_hand_joints,
+                            right_hand_joints,
+                            hand_action_lead_frames,
+                        )
+                    )
+
+                    if map_normalized_hand_actions:
+                        left_hand_joints = _map_normalized_grip_action(
+                            left_hand_joints, left_hand_closed_pose
+                        )
+                        right_hand_joints = _map_normalized_grip_action(
+                            right_hand_joints, right_hand_closed_pose
+                        )
 
                     frame_index = np.array([zmq_frame_counter], dtype=np.int64)
                     zmq_frame_counter += 1

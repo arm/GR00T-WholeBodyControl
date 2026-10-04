@@ -53,6 +53,7 @@ exec docker run --rm "${tty_args[@]}" \
   --env PYTHONUNBUFFERED=1 \
   --env PYTHONPATH=/opt/gr00t-wbc-overlay:/workspace/Isaac-GR00T \
   --env "GROOT_COSMOS_PROCESSOR_PATH=/models/cosmos/snapshots/$(basename "$cosmos_snapshot")" \
+  --env "GROOT_POLICY_INFERENCE_SEED=${GROOT_POLICY_INFERENCE_SEED:-}" \
   --workdir /workspace/Isaac-GR00T \
   --entrypoint /opt/gr00t-venv/bin/python \
   "$image" \
