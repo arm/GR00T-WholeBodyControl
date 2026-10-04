@@ -126,6 +126,15 @@ def test_summarize_events_correlates_gr00t_and_wbc():
     assert summary["horizon_margin_ms"]["mean"] == pytest.approx(680)
     assert summary["action_transport_ms"]["mean"] == pytest.approx(1)
     assert summary["publish_deadlines"]["over_1_5x"] == 1
+    assert summary["horizon_exhaustion"]["repeated_last_action_frames"] == 0
+    assert summary["task_markers_s"]["task_success"] == pytest.approx(0.19)
+    assert summary["event_precursors"]["task_success"] == {
+        "action_to_event_ms": pytest.approx(10),
+        "chunk_id": 1,
+        "action_index": 8,
+        "hand_action_index": None,
+        "frame_index": 3,
+    }
     assert summary["frame_continuity"] == {
         "gaps": 1,
         "duplicates": 0,
@@ -146,3 +155,20 @@ def test_perfetto_trace_contains_inference_span_and_state_counter():
     assert inference["ph"] == "X"
     assert inference["dur"] == pytest.approx(100_000)
     assert state["ph"] == "C"
+
+
+def test_summarize_events_detects_repeated_final_action():
+    events = synthetic_events()
+    for item in events:
+        if item["event"] == "action_published":
+            item["action_index"] = 39
+            item.setdefault("hand_action_index", 39)
+
+    summary = summarize_events(events)
+
+    assert summary["horizon_exhaustion"] == {
+        "repeated_last_action_frames": 2,
+        "chunks_repeating_last_action": 1,
+        "max_repeated_last_action_frames": 2,
+        "max_repeated_last_action_ms": pytest.approx(40),
+    }

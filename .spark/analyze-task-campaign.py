@@ -174,6 +174,16 @@ def main() -> None:
                         "unmatched_published",
                     )
                 },
+                "horizon_exhaustion": {
+                    key: sum(
+                        member["horizon_exhaustion"][key]
+                        for member in realtime_members
+                    )
+                    for key in (
+                        "repeated_last_action_frames",
+                        "chunks_repeating_last_action",
+                    )
+                },
             }
         scenarios[key] = scenario_metrics
 

@@ -1043,6 +1043,7 @@ class BottleTaskEnv(DefaultEnv):
             and abs(position[1]) <= self.TABLE_ABS_Y_BOUND
         )
 
+        success_before_update = self.success
         if current_contact and lifted and object_in_bounds:
             if self.lift_started_wall_time is None:
                 self.lift_started_wall_time = wall_time
@@ -1050,6 +1051,15 @@ class BottleTaskEnv(DefaultEnv):
                 self.success = True
         else:
             self.lift_started_wall_time = None
+        if self.success and not success_before_update:
+            _TRACE.emit(
+                "task_success",
+                status="success",
+                task_time_s=wall_time - self.armed_wall_time,
+                simulator_time_s=self.simulator_elapsed,
+                object_z=object_z,
+            )
+            self._trace_terminal_status = "success"
 
         wrist_position = self.mj_data.xpos[
             self.mj_model.body("right_wrist_yaw_link").id

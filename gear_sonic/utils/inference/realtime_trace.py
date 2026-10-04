@@ -249,6 +249,60 @@ def summarize_events(
         elif current > previous + 1:
             gaps += current - previous - 1
 
+    last_index_counts: dict[int, int] = defaultdict(int)
+    for event in published:
+        if event["action_index"] == action_horizon - 1:
+            last_index_counts[event["chunk_id"]] += 1
+    repeated_last_frames = sum(
+        max(0, count - 1) for count in last_index_counts.values()
+    )
+    max_repeated_last_frames = max(
+        (max(0, count - 1) for count in last_index_counts.values()),
+        default=0,
+    )
+
+    marker_names = (
+        "contact_started",
+        "assisted_grasp_activated",
+        "lift_started",
+        "task_success",
+        "task_failed",
+        "policy_paused",
+    )
+    task_markers_s = {}
+    event_precursors = {}
+    for marker_name in marker_names:
+        marker = next(
+            (
+                event
+                for event in events
+                if event["event"] == marker_name and event["mono_ns"] >= start_ns
+            ),
+            None,
+        )
+        if marker is None:
+            continue
+        task_markers_s[marker_name] = (marker["mono_ns"] - start_ns) / 1e9
+        prior_action = next(
+            (
+                event
+                for event in reversed(published)
+                if event["mono_ns"] <= marker["mono_ns"]
+            ),
+            None,
+        )
+        if prior_action is not None:
+            event_precursors[marker_name] = {
+                "action_to_event_ms": (
+                    marker["mono_ns"] - prior_action["mono_ns"]
+                )
+                / 1e6,
+                "chunk_id": prior_action["chunk_id"],
+                "action_index": prior_action["action_index"],
+                "hand_action_index": prior_action.get("hand_action_index"),
+                "frame_index": prior_action["frame_index"],
+            }
+
     return {
         "schema_version": TRACE_SCHEMA_VERSION,
         "active_window": {
@@ -287,6 +341,18 @@ def summarize_events(
             "out_of_order": out_of_order,
             "unmatched_published": unmatched_published,
         },
+        "horizon_exhaustion": {
+            "repeated_last_action_frames": repeated_last_frames,
+            "chunks_repeating_last_action": sum(
+                count > 1 for count in last_index_counts.values()
+            ),
+            "max_repeated_last_action_frames": max_repeated_last_frames,
+            "max_repeated_last_action_ms": (
+                max_repeated_last_frames * 1000.0 / action_rate_hz
+            ),
+        },
+        "task_markers_s": task_markers_s,
+        "event_precursors": event_precursors,
     }
 
 
